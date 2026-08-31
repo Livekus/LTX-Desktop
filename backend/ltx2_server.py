@@ -8,6 +8,11 @@ from server_utils.win_dll_search import remove_cwd_from_dll_search_path
 # Before torch / native extensions: do not search CWD for DLLs (Windows hijack).
 remove_cwd_from_dll_search_path()
 
+if sys.platform == "win32":
+    import truststore
+
+    truststore.inject_into_ssl()
+
 faulthandler.enable(file=sys.stderr, all_threads=True)
 from typing import Any, cast
 

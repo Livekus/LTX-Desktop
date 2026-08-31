@@ -3222,9 +3222,17 @@ export function GenSpace() {
                     </div>
                     <p className="text-sm text-zinc-400">{statusMessage || 'Generating...'}</p>
                     {progress > 0 && (
-                      <div className="w-32 h-1 bg-zinc-800 rounded-full mt-2 overflow-hidden">
-                        <div className="h-full bg-violet-500 transition-all" style={{ width: `${progress}%` }} />
-                      </div>
+                      <>
+                        <div className="w-32 h-1 bg-zinc-800 rounded-full mt-2 overflow-hidden">
+                          <div
+                            className="h-full bg-violet-500 transition-all"
+                            style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
+                          />
+                        </div>
+                        <p className="mt-1 text-[10px] text-zinc-500">
+                          {Math.round(Math.max(0, Math.min(100, progress)))}%
+                        </p>
+                      </>
                     )}
                   </div>
                 </div>

@@ -1,13 +1,14 @@
-"""Monkey-patch: replace safe_open metadata reads with direct file reads.
+"""Monkey-patch: replace safe_open metadata / streaming reads with direct file reads.
 
 safetensors' safe_open uses torch.UntypedStorage.from_file(shared=False) which
 reserves copy-on-write commit charge equal to the file size. For a 22GB
 checkpoint, this reserves 22GB of commit charge just to read a small JSON
 header. Under memory pressure, this causes "paging file too small" errors.
 
-This patch replaces metadata-only safe_open calls — and the FP8 scale / streaming
-key-scan reads that still used safe_open on the full checkpoint — with direct
-file reads that parse the safetensors header without mmap or commit charge.
+This patch replaces metadata-only safe_open calls, FP8 scale / streaming key-scan
+reads, and block-streaming DiskTensorReader reads that still used safe_open on
+the full checkpoint with direct file reads that parse the safetensors header
+without mmap or commit charge.
 
 Remove this patch once safetensors supports read-only file mapping.
 
@@ -17,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 import json
 import struct
 from pathlib import Path
@@ -275,3 +277,70 @@ assert hasattr(_streaming_builder_module, "_scan_checkpoint_keys") and callable(
     _streaming_builder_module._scan_checkpoint_keys
 ), "block_streaming.builder._scan_checkpoint_keys not found — patch needs updating."
 _streaming_builder_module._scan_checkpoint_keys = _patched_scan_checkpoint_keys  # type: ignore[assignment]
+
+
+# --- Patch 7: ltx_core.block_streaming.disk.DiskTensorReader ---
+# Disk streaming still constructed a safetensors.safe_open handle for the 22 GB
+# transformer checkpoint and failed at generation step 2 on low-commit Windows
+# systems, after the header-only scans above had already succeeded.
+
+import ltx_core.block_streaming.disk as _streaming_disk_module
+
+
+class _DirectSafetensorsFile:
+    """One safetensors file indexed by header only; tensor data is read by seek."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.header, self.data_offset = _read_safetensors_header(path)
+        self.handle = open(path, "rb")
+
+    def keys(self) -> Iterator[str]:
+        return (key for key in self.header if key != "__metadata__")
+
+    def get_tensor(self, key: str) -> torch.Tensor:
+        return _read_tensor(self.path, self.header[key], self.data_offset, self.handle)
+
+    def close(self) -> None:
+        self.handle.close()
+
+
+class _PatchedDiskTensorReader:
+    """Key-based tensor accessor over safetensors files without safe_open/mmap."""
+
+    def __init__(self, paths: list[str]) -> None:
+        self._files: list[_DirectSafetensorsFile] = []
+        self._key_to_file_idx: dict[str, int] = {}
+        try:
+            for path in paths:
+                file = _DirectSafetensorsFile(path)
+                file_idx = len(self._files)
+                self._files.append(file)
+                for key in file.keys():
+                    self._key_to_file_idx[key] = file_idx
+        except Exception:
+            self.close()
+            raise
+
+    def get_tensor(self, key: str) -> torch.Tensor:
+        return self._files[self._key_to_file_idx[key]].get_tensor(key)
+
+    def close(self) -> None:
+        for file in self._files:
+            file.close()
+        self._files.clear()
+        self._key_to_file_idx.clear()
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._key_to_file_idx
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._key_to_file_idx)
+
+
+assert hasattr(_streaming_disk_module, "DiskTensorReader"), (
+    "block_streaming.disk.DiskTensorReader not found — patch needs updating."
+)
+_streaming_disk_module.DiskTensorReader = _PatchedDiskTensorReader  # type: ignore[assignment]
+# builder.py imports the class directly, so its module-local binding must be patched too.
+_streaming_builder_module.DiskTensorReader = _PatchedDiskTensorReader  # type: ignore[assignment]

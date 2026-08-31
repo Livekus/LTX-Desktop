@@ -12,6 +12,21 @@ const POLLING_INTERVAL_MS = 2000
 
 export const GENERATION_RECOVERY_KEY = 'ltx-generation-recovery'
 
+interface PhaseProgressRange {
+  start: number
+  end: number
+  estimateSeconds: number
+}
+
+const VIDEO_PHASE_PROGRESS_RANGES: Record<string, PhaseProgressRange> = {
+  loading_stage_1_weights: { start: 20, end: 34, estimateSeconds: 420 },
+  denoising_stage_1: { start: 35, end: 58, estimateSeconds: 180 },
+  upscaling_latents: { start: 60, end: 64, estimateSeconds: 90 },
+  loading_stage_2_weights: { start: 65, end: 77, estimateSeconds: 720 },
+  denoising_stage_2: { start: 78, end: 89, estimateSeconds: 240 },
+  decoding: { start: 90, end: 95, estimateSeconds: 180 },
+}
+
 export interface GenerationRecoveryContext {
   projectId: string
   prompt: string
@@ -131,15 +146,31 @@ function getPhaseMessage(phase: string): string {
     case 'uploading_audio':
       return 'Uploading audio...'
     case 'loading_model':
-      return 'Loading model...'
+      return 'Preparing pipeline...'
     case 'encoding_text':
       return 'Encoding prompt...'
+    case 'preparing_embeddings':
+      return 'Preparing prompt embeddings...'
+    case 'preparing_latents':
+      return 'Preparing latents...'
+    case 'preparing_inference':
+      return 'Preparing generation...'
+    case 'loading_stage_1_weights':
+      return 'Streaming stage 1 weights from SSD/RAM...'
+    case 'denoising_stage_1':
+      return 'Generating base video...'
+    case 'upscaling_latents':
+      return 'Upscaling latent video...'
+    case 'loading_stage_2_weights':
+      return 'Streaming stage 2 weights from SSD/RAM...'
+    case 'denoising_stage_2':
+      return 'Refining video...'
     case 'inference':
       return 'Generating...'
     case 'downloading_output':
       return 'Downloading output...'
     case 'decoding':
-      return 'Decoding video...'
+      return 'Decoding and encoding video...'
     case 'complete':
       return 'Complete!'
     case 'cancelled':
@@ -276,9 +307,12 @@ export function useGeneration(): UseGenerationReturn {
 
         // Poll for real progress from backend with time-based interpolation
         let lastPhase = ''
-        let inferenceStartTime = 0
-        // Estimated inference time in seconds based on model
-        const estimatedInferenceTime = settings.model.startsWith('pro') ? 120 : 45
+        let phaseStartedAt = 0
+        const legacyInferenceRange: PhaseProgressRange = {
+          start: 15,
+          end: 95,
+          estimateSeconds: settings.model.startsWith('pro') ? 120 : 45,
+        }
 
         const pollProgress = async () => {
           if (!shouldApplyPollingUpdates) return
@@ -286,18 +320,25 @@ export function useGeneration(): UseGenerationReturn {
           if (!result.ok || !shouldApplyPollingUpdates) return
 
           const data = result.data
+          if (data.phase !== lastPhase) {
+            lastPhase = data.phase
+            phaseStartedAt = Date.now()
+          }
+
           let displayProgress = data.progress
           let statusMessage = getPhaseMessage(data.phase)
 
-          // Time-based interpolation during inference phase
-          if (data.phase === 'inference') {
-            if (lastPhase !== 'inference') {
-              inferenceStartTime = Date.now()
-            }
-            const elapsed = (Date.now() - inferenceStartTime) / 1000
-            // Interpolate from 15% to 95% based on estimated time
-            const inferenceProgress = Math.min(elapsed / estimatedInferenceTime, 0.95)
-            displayProgress = 15 + Math.floor(inferenceProgress * 80)
+          const phaseProgressRange = VIDEO_PHASE_PROGRESS_RANGES[data.phase]
+            ?? (data.phase === 'inference' ? legacyInferenceRange : null)
+          if (phaseProgressRange) {
+            const elapsedSeconds = (Date.now() - phaseStartedAt) / 1000
+            const rangeSize = phaseProgressRange.end - phaseProgressRange.start
+            const phaseRatio = Math.min(elapsedSeconds / phaseProgressRange.estimateSeconds, 0.95)
+            const interpolatedProgress = phaseProgressRange.start + Math.floor(phaseRatio * rangeSize)
+            displayProgress = Math.min(
+              phaseProgressRange.end,
+              Math.max(displayProgress, interpolatedProgress),
+            )
           }
 
           // Keep API/local completion as a terminal response state, not polling state.
@@ -306,8 +347,6 @@ export function useGeneration(): UseGenerationReturn {
             displayProgress = 95
             statusMessage = 'Finalizing...'
           }
-
-          lastPhase = data.phase
 
           setState(prev => {
             if (prev.isCancelling) {

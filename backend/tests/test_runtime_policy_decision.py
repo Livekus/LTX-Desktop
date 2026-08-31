@@ -67,7 +67,7 @@ def test_windows_without_cuda_unsupported() -> None:
 
 
 def test_windows_with_low_vram_unsupported() -> None:
-    assert decide_local_generation_mode(system="Windows", cuda_available=True, vram_gb=14) == "unsupported"
+    assert decide_local_generation_mode(system="Windows", cuda_available=True, vram_gb=11) == "unsupported"
 
 
 def test_windows_with_unknown_vram_unsupported() -> None:
@@ -75,13 +75,19 @@ def test_windows_with_unknown_vram_unsupported() -> None:
 
 
 def test_windows_streaming_range() -> None:
-    assert decide_local_generation_mode(system="Windows", cuda_available=True, vram_gb=15) == "streaming_models_loading"
-    assert decide_local_generation_mode(system="Windows", cuda_available=True, vram_gb=24) == "streaming_models_loading"
-    assert decide_local_generation_mode(system="Windows", cuda_available=True, vram_gb=30) == "streaming_models_loading"
+    assert (
+        decide_local_generation_mode(system="Windows", cuda_available=True, vram_gb=12, fp8_capable=False)
+        == "streaming_models_loading"
+    )
+    assert (
+        decide_local_generation_mode(system="Windows", cuda_available=True, vram_gb=30, fp8_capable=False)
+        == "streaming_models_loading"
+    )
 
 
 def test_windows_full_loading_range() -> None:
-    assert decide_local_generation_mode(system="Windows", cuda_available=True, vram_gb=31) == "full_models_loading"
+    assert decide_local_generation_mode(system="Windows", cuda_available=True, vram_gb=12) == "full_models_loading"
+    assert decide_local_generation_mode(system="Windows", cuda_available=True, vram_gb=16) == "full_models_loading"
     assert decide_local_generation_mode(system="Windows", cuda_available=True, vram_gb=96) == "full_models_loading"
 
 
@@ -90,7 +96,7 @@ def test_linux_without_cuda_unsupported() -> None:
 
 
 def test_linux_with_low_vram_unsupported() -> None:
-    assert decide_local_generation_mode(system="Linux", cuda_available=True, vram_gb=14) == "unsupported"
+    assert decide_local_generation_mode(system="Linux", cuda_available=True, vram_gb=11) == "unsupported"
 
 
 def test_linux_with_unknown_vram_unsupported() -> None:
@@ -98,18 +104,25 @@ def test_linux_with_unknown_vram_unsupported() -> None:
 
 
 def test_linux_streaming_range() -> None:
-    assert decide_local_generation_mode(system="Linux", cuda_available=True, vram_gb=15) == "streaming_models_loading"
-    assert decide_local_generation_mode(system="Linux", cuda_available=True, vram_gb=30) == "streaming_models_loading"
+    assert (
+        decide_local_generation_mode(system="Linux", cuda_available=True, vram_gb=12, fp8_capable=False)
+        == "streaming_models_loading"
+    )
+    assert (
+        decide_local_generation_mode(system="Linux", cuda_available=True, vram_gb=30, fp8_capable=False)
+        == "streaming_models_loading"
+    )
 
 
 def test_linux_full_loading_range() -> None:
-    assert decide_local_generation_mode(system="Linux", cuda_available=True, vram_gb=31) == "full_models_loading"
+    assert decide_local_generation_mode(system="Linux", cuda_available=True, vram_gb=12) == "full_models_loading"
+    assert decide_local_generation_mode(system="Linux", cuda_available=True, vram_gb=16) == "full_models_loading"
 
 
 def test_linux_without_fp8_still_unsupported_below_streaming_floor() -> None:
     assert (
         decide_local_generation_mode(
-            system="Linux", cuda_available=True, vram_gb=14, fp8_capable=False
+            system="Linux", cuda_available=True, vram_gb=11, fp8_capable=False
         )
         == "unsupported"
     )
@@ -141,10 +154,10 @@ def test_windows_without_fp8_streams_even_above_full_floor() -> None:
 
 
 def test_fp8_capable_default_preserves_cuda_full_loading() -> None:
-    assert decide_local_generation_mode(system="Linux", cuda_available=True, vram_gb=31) == "full_models_loading"
+    assert decide_local_generation_mode(system="Linux", cuda_available=True, vram_gb=12) == "full_models_loading"
     assert (
         decide_local_generation_mode(
-            system="Linux", cuda_available=True, vram_gb=31, fp8_capable=True
+            system="Linux", cuda_available=True, vram_gb=12, fp8_capable=True
         )
         == "full_models_loading"
     )

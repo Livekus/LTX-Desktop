@@ -3,17 +3,28 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+import logging
+import os
+from typing import TYPE_CHECKING, Literal
 
 import torch
 
 from api_types import ImageConditioningInput
 from services.services_utils import AudioOrNone, PipelineTilingType, TilingConfigType, device_supports_fp8
 
+logger = logging.getLogger(__name__)
+
+_GIB = 1024**3
+_DEFAULT_CUDA_RAM_STREAMING_MIN_FREE_GB = 48.0
+_CUDA_RAM_STREAMING_MIN_FREE_GB_ENV = "LTX_CUDA_RAM_STREAMING_MIN_FREE_GB"
+_CUDA_STREAMING_OFFLOAD_MODE_ENV = "LTX_CUDA_STREAMING_OFFLOAD_MODE"
+
 if TYPE_CHECKING:
     from ltx_core.components.guiders import MultiModalGuiderParams
     from ltx_pipelines.utils.model_paths import ModelPaths
     from ltx_pipelines.utils.types import OffloadMode
+
+type CudaStreamingOffloadOverride = Literal["cpu", "disk"]
 
 
 def auto_tiling_config() -> PipelineTilingType:
@@ -128,8 +139,9 @@ def offload_mode_for_prefetch_count(streaming_prefetch_count: int | None, device
     (runtime_config/runtime_policy.py) distinguishes fully resident (None) vs streaming
     (an int); which *kind* of streaming depends on the device's memory model:
 
-    - CUDA: system RAM is separate from VRAM, so OffloadMode.CPU pins the blocks in host
-      RAM and streams them to the smaller VRAM — the fast streaming path.
+    - CUDA: system RAM is separate from VRAM, so OffloadMode.CPU stages blocks in
+      host RAM and streams them to the smaller VRAM. That is fastest only when enough
+      free RAM exists; otherwise OffloadMode.DISK avoids Windows pagefile thrash.
     - MPS (Apple Silicon): CPU-pinned weights live in the *same* unified RAM as the GPU,
       so OffloadMode.CPU (which pins every block, ~46 GB for the bf16 transformer) OOMs.
       OffloadMode.DISK mmaps blocks from the checkpoint through a small pinned buffer
@@ -142,7 +154,77 @@ def offload_mode_for_prefetch_count(streaming_prefetch_count: int | None, device
         return OffloadMode.NONE
     if device.type == "mps":
         return OffloadMode.DISK
+    if device.type == "cuda":
+        override = _cuda_streaming_offload_override()
+        if override == "disk":
+            logger.info("Using disk-backed CUDA streaming because %s=disk", _CUDA_STREAMING_OFFLOAD_MODE_ENV)
+            return OffloadMode.DISK
+        if override == "cpu":
+            logger.info("Using RAM-backed CUDA streaming because %s=cpu", _CUDA_STREAMING_OFFLOAD_MODE_ENV)
+            return OffloadMode.CPU
+        if _should_use_disk_streaming_for_cuda():
+            return OffloadMode.DISK
     return OffloadMode.CPU
+
+
+def _cuda_streaming_offload_override() -> CudaStreamingOffloadOverride | None:
+    raw_value = os.environ.get(_CUDA_STREAMING_OFFLOAD_MODE_ENV)
+    if raw_value is None or raw_value.strip() == "":
+        return None
+
+    normalized_value = raw_value.strip().lower()
+    if normalized_value == "auto":
+        return None
+    if normalized_value in {"cpu", "disk"}:
+        return normalized_value
+
+    logger.warning(
+        "Ignoring invalid %s=%r; expected auto, cpu, or disk",
+        _CUDA_STREAMING_OFFLOAD_MODE_ENV,
+        raw_value,
+    )
+    return None
+
+
+def _cuda_ram_streaming_min_available_bytes() -> int:
+    raw_value = os.environ.get(_CUDA_RAM_STREAMING_MIN_FREE_GB_ENV)
+    if raw_value is None or raw_value.strip() == "":
+        return int(_DEFAULT_CUDA_RAM_STREAMING_MIN_FREE_GB * _GIB)
+
+    try:
+        threshold_gb = float(raw_value)
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid %s=%r; using %.0f GiB",
+            _CUDA_RAM_STREAMING_MIN_FREE_GB_ENV,
+            raw_value,
+            _DEFAULT_CUDA_RAM_STREAMING_MIN_FREE_GB,
+        )
+        return int(_DEFAULT_CUDA_RAM_STREAMING_MIN_FREE_GB * _GIB)
+
+    return max(0, int(threshold_gb * _GIB))
+
+
+def _should_use_disk_streaming_for_cuda() -> bool:
+    min_available_bytes = _cuda_ram_streaming_min_available_bytes()
+    if min_available_bytes <= 0:
+        return False
+
+    try:
+        available_bytes = host_available_bytes()
+    except Exception:
+        logger.warning("Could not read free host RAM; keeping RAM-backed CUDA streaming", exc_info=True)
+        return False
+
+    if available_bytes >= min_available_bytes:
+        return False
+
+    logger.info(
+        "Using disk-backed CUDA streaming: %.1f GiB host RAM available below %.1f GiB threshold",
+        available_bytes / _GIB,
+        min_available_bytes / _GIB,
+    )
+    return True
 
 
 def encode_video_output(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 import logging
 import os
 
@@ -61,6 +63,72 @@ if TYPE_CHECKING:
     from runtime_config.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
+
+type ProgressUpdater = Callable[[str, int, int | None, int | None], None]
+
+_LTX_PIPELINE_PROGRESS_LOGGER_NAMES = ("ltx_pipelines.utils.blocks",)
+
+
+class _LtxPipelineProgressLogHandler(logging.Handler):
+    def __init__(self, update_progress: ProgressUpdater, total_steps: int) -> None:
+        super().__init__(level=logging.INFO)
+        self._update_progress = update_progress
+        self._total_steps = total_steps
+        self._transformer_builds_seen = 0
+        self._denoising_loops_seen = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._handle_message(record.getMessage())
+        except Exception:
+            self.handleError(record)
+
+    def _handle_message(self, message: str) -> None:
+        if message.startswith("Building text encoder"):
+            self._update_progress("encoding_text", 10, 0, self._total_steps)
+            return
+        if message.startswith("Text encoder done"):
+            self._update_progress("preparing_embeddings", 12, 0, self._total_steps)
+            return
+        if message.startswith("Prompt encoding complete"):
+            self._update_progress("preparing_latents", 14, 0, self._total_steps)
+            return
+        if message.startswith("Building transformer"):
+            self._transformer_builds_seen += 1
+            if self._transformer_builds_seen == 1:
+                self._update_progress("loading_stage_1_weights", 20, 0, self._total_steps)
+            else:
+                self._update_progress("loading_stage_2_weights", 65, min(8, self._total_steps), self._total_steps)
+            return
+        if message.startswith("Running denoising loop"):
+            self._denoising_loops_seen += 1
+            if self._denoising_loops_seen == 1:
+                self._update_progress("denoising_stage_1", 35, 0, self._total_steps)
+            else:
+                self._update_progress("denoising_stage_2", 78, min(8, self._total_steps), self._total_steps)
+            return
+        if message.startswith("Building video encoder + spatial upsampler"):
+            self._update_progress("upscaling_latents", 60, min(8, self._total_steps), self._total_steps)
+            return
+        if message.startswith("Building video decoder"):
+            self._update_progress("decoding", 90, self._total_steps, self._total_steps)
+            return
+        if message.startswith("Building audio decoder"):
+            self._update_progress("decoding", 92, self._total_steps, self._total_steps)
+
+
+@contextmanager
+def _ltx_pipeline_progress_from_logs(update_progress: ProgressUpdater, total_steps: int) -> Iterator[None]:
+    progress_handler = _LtxPipelineProgressLogHandler(update_progress, total_steps)
+    progress_loggers = [logging.getLogger(name) for name in _LTX_PIPELINE_PROGRESS_LOGGER_NAMES]
+
+    for progress_logger in progress_loggers:
+        progress_logger.addHandler(progress_handler)
+    try:
+        yield
+    finally:
+        for progress_logger in progress_loggers:
+            progress_logger.removeHandler(progress_handler)
 
 
 def _wxh(size: tuple[int, int]) -> str:
@@ -358,7 +426,7 @@ class VideoGenerationHandler(StateHandlerBase):
 
         self._generation.raise_if_cancelled()
 
-        total_steps = 8
+        total_steps = 11
 
         if keyframe_images:
             images, temp_image_paths = self._keyframe_conditionings(keyframe_images)
@@ -388,7 +456,7 @@ class VideoGenerationHandler(StateHandlerBase):
             logger.info("[%s] Text encoding (%s): %.2fs", gen_mode, encoding_method, t_text_end - t_text_start)
 
             self._generation.raise_if_cancelled()
-            self._generation.update_progress("inference", 15, 0, total_steps)
+            self._generation.update_progress("preparing_inference", 15, 0, total_steps)
 
             # Guard for the /64 two-stage grid. Half-way values round up: Python's round() is
             # half-to-even, which turned a 544 height into 512 and silently shipped a frame 32px
@@ -397,7 +465,10 @@ class VideoGenerationHandler(StateHandlerBase):
             width = snap_up_to_multiple(width, 64)
 
             t_inference_start = time.perf_counter()
-            with log_heartbeat(f"{gen_mode} inference"):
+            with (
+                log_heartbeat(f"{gen_mode} inference"),
+                _ltx_pipeline_progress_from_logs(self._generation.update_progress, total_steps),
+            ):
                 pipeline_state.pipeline.generate(
                     prompt=enhanced_prompt,
                     seed=seed,
@@ -493,23 +564,24 @@ class VideoGenerationHandler(StateHandlerBase):
             self._generation.update_progress("encoding_text", 10, 0, total_steps)
             self._text.prepare_text_encoding(enhanced_prompt, enhance_prompt=a2v_enhance)
             self._generation.raise_if_cancelled()
-            self._generation.update_progress("inference", 15, 0, total_steps)
+            self._generation.update_progress("preparing_inference", 15, 0, total_steps)
 
-            a2v_state.pipeline.generate(
-                prompt=enhanced_prompt,
-                negative_prompt=neg,
-                seed=seed,
-                height=height,
-                width=width,
-                num_frames=num_frames,
-                frame_rate=fps,
-                num_inference_steps=total_steps,
-                images=images,
-                audio_path=audio_path_str,
-                audio_start_time=0.0,
-                audio_max_duration=None,
-                output_path=str(output_path),
-            )
+            with _ltx_pipeline_progress_from_logs(self._generation.update_progress, total_steps):
+                a2v_state.pipeline.generate(
+                    prompt=enhanced_prompt,
+                    negative_prompt=neg,
+                    seed=seed,
+                    height=height,
+                    width=width,
+                    num_frames=num_frames,
+                    frame_rate=fps,
+                    num_inference_steps=total_steps,
+                    images=images,
+                    audio_path=audio_path_str,
+                    audio_start_time=0.0,
+                    audio_max_duration=None,
+                    output_path=str(output_path),
+                )
 
             # Denoiser interrupt cannot abort VAE decode / ffmpeg; a Stop after the last
             # denoise step still finishes encode, then this check drops the file.

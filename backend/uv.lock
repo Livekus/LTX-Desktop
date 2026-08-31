@@ -570,6 +570,7 @@ dependencies = [
     { name = "transformers" },
     { name = "triton", marker = "sys_platform == 'linux'" },
     { name = "triton-windows", marker = "sys_platform == 'win32'" },
+    { name = "truststore" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -622,6 +623,7 @@ requires-dist = [
     { name = "transformers", specifier = ">=5.14.1,<5.15" },
     { name = "triton", marker = "sys_platform == 'linux'" },
     { name = "triton-windows", marker = "sys_platform == 'win32'" },
+    { name = "truststore", specifier = ">=0.10.4" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
 ]
 provides-extras = ["test", "dev"]
@@ -2105,6 +2107,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/66/b1/9744fc17eded50644ffb95f3f4b1ffd1f42d646d6e0a811d92e43834865e/triton_windows-3.6.0.post25-cp312-cp312-win_amd64.whl", hash = "sha256:8361375ee4b5e0a4fe7a3c7fc2fde368ce74237396d8ff95c2e26983dd32e342", size = 47382693, upload-time = "2026-01-26T03:21:28.157Z" },
     { url = "https://files.pythonhosted.org/packages/e5/cb/1f5f738cf8f6b8c6d475a92422251228a16ca2ee6f872d0f63c761f02896/triton_windows-3.6.0.post25-cp313-cp313-win_amd64.whl", hash = "sha256:d22e5f6f4896b43037d811910e2fcc5ff5f057b78f6094ab28999e4a21997b76", size = 47383937, upload-time = "2026-01-26T03:21:35.071Z" },
     { url = "https://files.pythonhosted.org/packages/c7/d3/58ad68518e04a97ce0549cad98eccbafac01ddba640379776a58b513020b/triton_windows-3.6.0.post25-cp314-cp314-win_amd64.whl", hash = "sha256:6f4c4775b22cfb18e9c60aead83deb7b9b970624ae3c13cd26b9be80b5cb8cd8", size = 48566374, upload-time = "2026-01-26T03:21:41.743Z" },
+]
+
+[[package]]
+name = "truststore"
+version = "0.10.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/53/a3/1585216310e344e8102c22482f6060c7a6ea0322b63e026372e6dcefcfd6/truststore-0.10.4.tar.gz", hash = "sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301", size = 26169, upload-time = "2025-08-12T18:49:02.73Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/19/97/56608b2249fe206a67cd573bc93cd9896e1efb9e98bce9c163bcdc704b88/truststore-0.10.4-py3-none-any.whl", hash = "sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981", size = 18660, upload-time = "2025-08-12T18:49:01.46Z" },
 ]
 
 [[package]]

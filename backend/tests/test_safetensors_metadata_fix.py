@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import torch
 from ltx_core.block_streaming import builder as streaming_builder
+from ltx_core.block_streaming import disk as streaming_disk
 from ltx_core.model.transformer.model_configurator import LTXV_MODEL_COMFY_RENAMING_MAP
 from ltx_core.quantization import fp8_cast
 from safetensors.torch import save_file
@@ -92,6 +93,26 @@ def test_scan_checkpoint_keys_survives_safe_open_paging_file_error(
     assert non_block_keys == [(_NON_BLOCK_KEY, "proj_in.weight")]
 
 
+def test_disk_tensor_reader_survives_safe_open_paging_file_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ckpt = _write_checkpoint(tmp_path / "model.safetensors")
+    monkeypatch.setattr(streaming_disk.safetensors, "safe_open", _boom)
+
+    reader = streaming_builder.DiskTensorReader([str(ckpt)])
+    try:
+        assert _WEIGHT_KEY in reader
+        assert _SCALE_KEY in set(reader)
+        torch.testing.assert_close(
+            reader.get_tensor(_NON_BLOCK_KEY),
+            torch.zeros(2, 2, dtype=torch.bfloat16),
+        )
+    finally:
+        reader.close()
+
+
 def test_patch_rebinds_read_scales_and_scan_checkpoint_keys() -> None:
     assert fp8_cast._read_scales is patch._patched_read_scales
     assert streaming_builder._scan_checkpoint_keys is patch._patched_scan_checkpoint_keys
+    assert streaming_disk.DiskTensorReader is patch._PatchedDiskTensorReader
+    assert streaming_builder.DiskTensorReader is patch._PatchedDiskTensorReader
