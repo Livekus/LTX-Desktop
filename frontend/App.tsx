@@ -28,6 +28,8 @@ type SetupState = 'loading' | { needsSetup: boolean; needsLicense: boolean }
 type RequiredModelsGateState = 'checking' | 'missing' | 'ready'
 type LtxRecommendation = ApiSuccessOf<'getLtxRecommendation'>
 type LtxUpgradeRecommendation = Extract<LtxRecommendation, { status: 'upgrade' }>
+const FORCED_API_GATEWAY_TITLE = 'Connect API Keys'
+const FORCED_API_GATEWAY_DESCRIPTION = 'This app is configured for API-only generation. Add your API key to continue.'
 
 function AppContent() {
   const { currentView } = useView()
@@ -55,6 +57,7 @@ function AppContent() {
   const setupCompletionInFlightRef = useRef<Promise<void> | null>(null)
 
   type ApiGatewayRequest = {
+    source?: 'forced-api' | 'event'
     requiredKeys: Array<'ltx' | 'fal'>
     title: string
     description: string
@@ -84,6 +87,7 @@ function AppContent() {
       const detail = (e as CustomEvent).detail ?? {}
       const requiredKeys = Array.isArray(detail.requiredKeys) ? detail.requiredKeys : ['ltx']
       setApiGatewayRequest({
+        source: 'event',
         requiredKeys,
         title: detail.title ?? 'Connect API Keys',
         description: detail.description ?? 'Add the required API keys to continue.',
@@ -365,21 +369,35 @@ function AppContent() {
 
   const showGlobalControls = currentView !== 'home' && connected && setupState !== 'loading' && !setupState.needsSetup
   const shouldBlockUntilSettingsLoaded = forceApiGenerations && !isLoaded
-  const shouldShowForcedFirstRunUpsell = isForcedFirstRun && isLoaded && !settings.hasLtxApiKey
-  const shouldShowGlobalForcedUpsell = forceApiGenerations && setupState !== 'loading' && !setupState.needsSetup && isLoaded && !settings.hasLtxApiKey
+  const shouldShowForcedFirstRunUpsell = runtimePolicyLoaded && isForcedFirstRun && isLoaded && !settings.hasLtxApiKey
+  const shouldShowGlobalForcedUpsell = runtimePolicyLoaded && forceApiGenerations && setupState !== 'loading' && !setupState.needsSetup && isLoaded && !settings.hasLtxApiKey
   const shouldBlockForLtxKey = shouldShowForcedFirstRunUpsell || shouldShowGlobalForcedUpsell
 
   useEffect(() => {
-    if (shouldBlockForLtxKey && apiGatewayRequest === null) {
-      setApiGatewayRequest({
-        requiredKeys: ['ltx'],
-        title: 'Connect API Keys',
-        description: 'This app is configured for API-only generation. Add your API key to continue.',
-        blocking: true,
-        includeOptionalMissing: true,
-      })
-    }
-  }, [shouldBlockForLtxKey, apiGatewayRequest])
+    setApiGatewayRequest((current) => {
+      if (shouldBlockForLtxKey) {
+        if (current !== null) return current
+        return {
+          source: 'forced-api',
+          requiredKeys: ['ltx'],
+          title: FORCED_API_GATEWAY_TITLE,
+          description: FORCED_API_GATEWAY_DESCRIPTION,
+          blocking: true,
+          includeOptionalMissing: true,
+        }
+      }
+
+      const isForcedRequest =
+        current?.source === 'forced-api' ||
+        (
+          current?.source === undefined &&
+          current?.blocking === true &&
+          current.requiredKeys.includes('ltx') &&
+          current.description === FORCED_API_GATEWAY_DESCRIPTION
+        )
+      return isForcedRequest ? null : current
+    })
+  }, [shouldBlockForLtxKey])
 
   const shouldShowGateway = apiGatewayRequest !== null
 

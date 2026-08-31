@@ -41,8 +41,8 @@ DARWIN_STREAMING_FLOOR_GB = 15
 # machine that actually has this much RAM free.
 DARWIN_FULL_RESIDENT_FLOOR_GB = 85
 
-CUDA_LOCAL_GENERATION_FLOOR_GB = 12
-CUDA_FULL_RESIDENT_FLOOR_GB = 12
+CUDA_LOCAL_GENERATION_FLOOR_GB = 15
+CUDA_FULL_RESIDENT_FLOOR_GB = 31
 
 
 def decide_local_generation_mode(
@@ -57,12 +57,12 @@ def decide_local_generation_mode(
 
     - "unsupported": local generation is not viable; caller must route to the API.
     - "streaming_models_loading": enough memory to run, but model weights must be
-      streamed from pinned host RAM when CUDA is below the full-load floor.
+      streamed from pinned host RAM (15-30 GB range on CUDA).
     - "full_models_loading": enough memory to hold the whole model resident, so
       streaming is skipped to avoid unnecessary host-RAM pressure.
 
     On CUDA (Windows/Linux) the memory figure is discrete (total) VRAM, and
-    "full_models_loading" (>=``CUDA_FULL_RESIDENT_FLOOR_GB``) holds the fp8-halved transformer
+    "full_models_loading" (>=``CUDA_FULL_RESIDENT_FLOOR_GB``) holds the fp8-halved (~23 GB) transformer
     resident. Pass ``fp8_capable=False`` (ROCm today — see
     ``runtime_config.accelerator.accelerator_backend``) to stay on the streaming
     path regardless of VRAM: without fp8 the full ~42-46 GB bf16 transformer
@@ -100,7 +100,7 @@ def decide_local_generation_mode(
             return "unsupported"
         if vram_gb < CUDA_LOCAL_GENERATION_FLOOR_GB:
             return "unsupported"
-        # full_models_loading assumes the fp8-halved transformer
+        # full_models_loading's floor assumes the fp8-halved (~23 GB) transformer
         # (see module docstring). Without fp8 (ROCm today — see
         # runtime_config.accelerator.accelerator_backend), holding the full bf16
         # (~42-46 GB) transformer resident instead would OOM at this floor, so stay on
