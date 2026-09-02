@@ -84,6 +84,7 @@ import {
   modeOptionValues,
   type GenSpaceMode,
 } from '../lib/genspace-multi-keyframe'
+import { buildSharedVideoPrompt } from '../lib/genspace-prompt'
 import {
   applyKeyframeImagePaths,
   enhanceKeyframesPayload,
@@ -484,6 +485,44 @@ function resolveResolution(options: ResolutionOption[], key: string): { width: n
   const opt = options.find((o) => o.key === key)
   if (!opt || opt.width == null || opt.height == null) return undefined
   return { width: opt.width, height: opt.height }
+}
+
+function ProjectPromptCenter({
+  projectName,
+  prompt,
+  onPromptChange,
+}: {
+  projectName: string
+  prompt: string
+  onPromptChange: (prompt: string) => void
+}) {
+  return (
+    <aside className="flex w-80 flex-shrink-0 flex-col border-l border-zinc-800 bg-zinc-950/95 p-4">
+      <div className="flex-shrink-0">
+        <div className="flex items-center gap-2 text-white font-semibold">
+          <Sparkles className="h-4 w-4 text-zinc-300" />
+          <span>Input Center</span>
+        </div>
+        <p className="mt-1 text-xs text-zinc-500 truncate" title={projectName}>
+          Shared prompt for {projectName}
+        </p>
+      </div>
+
+      <label className="mt-5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+        Project prompt
+      </label>
+      <textarea
+        value={prompt}
+        onChange={(e) => onPromptChange(e.target.value)}
+        placeholder="Series premise, recurring characters, visual style, tone, and rules shared by every video in this project..."
+        className="mt-2 min-h-0 flex-1 resize-none rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm leading-5 text-white placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
+      />
+      <p className="mt-3 flex-shrink-0 text-xs leading-5 text-zinc-500">
+        This is prepended to video, retake, extend, and IC-LoRA generations.
+        Keep the bottom prompt for the current video's unique action.
+      </p>
+    </aside>
+  )
 }
 
 // Prompt bar component matching the design
@@ -1351,13 +1390,14 @@ const DEFAULT_VIDEO_SETTINGS = {
   aspectRatio: '16:9',
   imageResolution: '1080p',
   variations: 1,
-  audio: true,
+  audio: false,
   imageEditStrength: 0.6,
 }
 
 export function GenSpace() {
   const {
     activeProject,
+    setProject,
     addAsset,
     addTakeToAsset,
     updateAsset,
@@ -1376,6 +1416,7 @@ export function GenSpace() {
     setPendingIcLoraUpdate,
   } = useProjects()
   const currentProjectId = activeProject?.id ?? null
+  const centerPrompt = activeProject?.centerPrompt ?? ''
   const { shouldVideoGenerateWithLtxApi, shouldImageGenerateWithFalApi, forceApiGenerations, settings: appSettings } = useAppSettings()
   const {
     modelSpecs: videoGenerationModelSpecsResponse,
@@ -1408,9 +1449,18 @@ export function GenSpace() {
     resetHeight: resetPromptBarHeight,
     limits: promptBarHeightLimits,
   } = useGenSpacePromptBarHeight()
+  const handleCenterPromptChange = useCallback((nextPrompt: string) => {
+    if (!activeProject || !currentProjectId) return
+    setProject(currentProjectId, {
+      ...activeProject,
+      centerPrompt: nextPrompt,
+      updatedAt: Date.now(),
+    })
+  }, [activeProject, currentProjectId, setProject])
   const persistedVideoKeyRef = useRef<string | null>(null)
   const retakeSubmissionRef = useRef<{
     prompt: string
+    centerPrompt?: string
     model: RetakeExtendModel
     input: {
       videoPath: string | null
@@ -1421,6 +1471,7 @@ export function GenSpace() {
   } | null>(null)
   const icLoraSubmissionRef = useRef<{
     prompt: string
+    centerPrompt?: string
     input: {
       videoPath: string
       conditioningType: ICLoraConditioningType
@@ -1437,6 +1488,7 @@ export function GenSpace() {
   const generateSubmissionRef = useRef<{
     kind: 'video' | 'image'
     prompt: string
+    centerPrompt?: string
     settings: GenerationSettings
     modelLabel?: string
     inputImageUrl: string | null
@@ -1698,6 +1750,7 @@ export function GenSpace() {
   }>({ videoPath: null, duration: undefined })
   const extendSubmissionRef = useRef<{
     prompt: string
+    centerPrompt?: string
     model: RetakeExtendModel
     input: { videoPath: string; direction: ExtendDirection; duration: number; videoDuration: number }
   } | null>(null)
@@ -2026,6 +2079,7 @@ export function GenSpace() {
         generateSubmissionRef.current = {
           kind: ctx.genType === 'image' ? 'image' : 'video',
           prompt: ctx.prompt,
+          centerPrompt: ctx.centerPrompt,
           settings: s,
           modelLabel: ctx.modelLabel,
           inputImageUrl: ctx.inputImageUrl ?? null,
@@ -2061,6 +2115,9 @@ export function GenSpace() {
       logger.error('Video completed without a click-time submission; tagging from live picker state')
     }
     const usedPrompt = submission?.kind === 'video' ? submission.prompt : lastPrompt
+    const usedCenterPrompt = submission?.kind === 'video'
+      ? submission.centerPrompt
+      : centerPrompt.trim() || undefined
     const usedSettings: GenerationSettings = submission?.kind === 'video'
       ? submission.settings
       : {
@@ -2104,6 +2161,7 @@ export function GenSpace() {
           generationParams: {
             mode: genMode,
             prompt: usedPrompt,
+            centerPrompt: usedCenterPrompt,
             model: usedSettings.model,
             modelLabel: (submission?.kind === 'video' ? submission.modelLabel : undefined)
               ?? resolvePipelineDisplayName(videoModelSpecs, usedSettings.model)
@@ -2144,7 +2202,7 @@ export function GenSpace() {
         logger.error(`Failed to persist generated video asset: ${err}`)
       }
     })()
-  }, [videoPath, currentProjectId, isGenerating, settings, inputImage, inputLastImage, inputAudio, keyframes, lastPrompt, addAsset, reset, appSettings.modelsDir, videoModelSpecs, setMode])
+  }, [videoPath, currentProjectId, isGenerating, settings, inputImage, inputLastImage, inputAudio, keyframes, lastPrompt, centerPrompt, addAsset, reset, appSettings.modelsDir, videoModelSpecs, setMode])
 
   // When retake completes, add as take or new asset
   useEffect(() => {
@@ -2158,6 +2216,7 @@ export function GenSpace() {
 
     ;(async () => {
       const usedPrompt = submission.prompt
+      const usedCenterPrompt = submission.centerPrompt
       const usedInput = submission.input
       const copied = await addVisualAssetToProject(retakeResult.videoPath, currentProjectId, 'video')
       if (!copied) {
@@ -2214,6 +2273,7 @@ export function GenSpace() {
           generationParams: {
             mode: 'retake',
             prompt: usedPrompt,
+            centerPrompt: usedCenterPrompt,
             // Local mode hides the MODEL dropdown; don't persist the leftover API-mode
             // selection (e.g. 'pro' / 'pro-2.5') as a confident pipeline label.
             model: isLocalMode ? '' : submission.model,
@@ -2255,6 +2315,7 @@ export function GenSpace() {
 
     ;(async () => {
       const usedPrompt = submission.prompt
+      const usedCenterPrompt = submission.centerPrompt
       const usedInput = submission.input
       const copied = await addVisualAssetToProject(extendResult.videoPath, currentProjectId, 'video')
       if (!copied) {
@@ -2277,6 +2338,7 @@ export function GenSpace() {
         generationParams: {
           mode: 'extend',
           prompt: usedPrompt,
+          centerPrompt: usedCenterPrompt,
           // Local mode hides the MODEL dropdown; don't persist a leftover API selection.
           model: isLocalMode ? '' : submission.model,
           duration: usedInput.videoDuration + usedInput.duration,
@@ -2355,6 +2417,7 @@ export function GenSpace() {
           generationParams: {
             mode: 'ic-lora',
             prompt: submission.prompt,
+            centerPrompt: submission.centerPrompt,
             model: 'fast',
             duration: 0,
             resolution: '',
@@ -2756,6 +2819,9 @@ export function GenSpace() {
   }, []) // mount only
 
   const handleGenerate = async () => {
+    const centerPromptForSubmission = centerPrompt.trim() || undefined
+    const sharedVideoPrompt = buildSharedVideoPrompt(centerPrompt, prompt)
+
     if (mode === 'ic-lora') {
       if ((!prompt.trim() && !promptOptional) || !icLoraInput.videoPath || !icLoraInput.ready) return
 
@@ -2764,18 +2830,19 @@ export function GenSpace() {
       if (isCatalogIcLora && selectedIcLora) {
         icLoraSubmissionRef.current = {
           prompt,
+          centerPrompt: centerPromptForSubmission,
           input: {
             videoPath: icLoraInput.videoPath,
             conditioningType: 'custom',
             conditioningStrength: icLoraStrength,
           },
         }
-        await writeRecoveryContext({ prompt })
+        await writeRecoveryContext({ prompt, centerPrompt: centerPromptForSubmission })
         await submitIcLora({
           videoPath: '',
           conditioningType: 'custom',
           conditioningStrength: icLoraStrength,
-          prompt,
+          prompt: sharedVideoPrompt,
           icLoraId: selectedIcLora.id,
           variantId: selectedIcLoraVariantId ?? undefined,
           inputPath: icLoraInput.videoPath,
@@ -2808,6 +2875,7 @@ export function GenSpace() {
       if (isCustomIcLora && !icLoraCustomRef) return
       icLoraSubmissionRef.current = {
         prompt,
+        centerPrompt: centerPromptForSubmission,
         input: {
           videoPath: icLoraInput.videoPath,
           conditioningType: icLoraCondType,
@@ -2815,12 +2883,12 @@ export function GenSpace() {
           customLoraRef: isCustomIcLora ? icLoraCustomRef ?? undefined : undefined,
         },
       }
-      await writeRecoveryContext({ prompt })
+      await writeRecoveryContext({ prompt, centerPrompt: centerPromptForSubmission })
       await submitIcLora({
         videoPath: icLoraInput.videoPath,
         conditioningType: icLoraCondType,
         conditioningStrength: icLoraStrength,
-        prompt,
+        prompt: sharedVideoPrompt,
         customLoraRef: isCustomIcLora ? icLoraCustomRef ?? undefined : undefined,
         controlVideoPath: isCustomIcLora ? icLoraInput.videoPath : undefined,
         skipStage2: icLoraSkipStage2,
@@ -2838,6 +2906,7 @@ export function GenSpace() {
       if (!retakeInput.videoPath || retakeInput.duration < 2) return
       retakeSubmissionRef.current = {
         prompt,
+        centerPrompt: centerPromptForSubmission,
         model: retakeModel,
         input: {
           videoPath: retakeInput.videoPath,
@@ -2846,12 +2915,12 @@ export function GenSpace() {
           videoDuration: retakeInput.videoDuration,
         },
       }
-      await writeRecoveryContext({ prompt, model: retakeModel })
+      await writeRecoveryContext({ prompt, centerPrompt: centerPromptForSubmission, model: retakeModel })
       await submitRetake({
         videoPath: retakeInput.videoPath,
         startTime: retakeInput.startTime,
         duration: retakeInput.duration,
-        prompt,
+        prompt: sharedVideoPrompt,
         mode: 'replace_audio_and_video',
         resolution: resolveResolution(retakeResolutionOpts, retakeResolutionKey),
         model: retakeModel,
@@ -2863,6 +2932,7 @@ export function GenSpace() {
       if (!extendInput.videoPath || !extendInput.ready) return
       extendSubmissionRef.current = {
         prompt,
+        centerPrompt: centerPromptForSubmission,
         model: extendModel,
         input: {
           videoPath: extendInput.videoPath,
@@ -2871,11 +2941,11 @@ export function GenSpace() {
           videoDuration: extendInput.videoDuration,
         },
       }
-      await writeRecoveryContext({ prompt, model: extendModel })
+      await writeRecoveryContext({ prompt, centerPrompt: centerPromptForSubmission, model: extendModel })
       await submitExtend({
         videoPath: extendInput.videoPath,
         duration: extendSeconds,
-        prompt,
+        prompt: sharedVideoPrompt,
         mode: extendDirection,
         resolution: resolveResolution(extendResolutionOpts, extendResolutionKey),
         model: extendModel,
@@ -2946,6 +3016,7 @@ export function GenSpace() {
       generateSubmissionRef.current = {
         kind: 'video',
         prompt,
+        centerPrompt: centerPromptForSubmission,
         settings: genSettings,
         modelLabel,
         inputImageUrl: imagePath,
@@ -2955,6 +3026,7 @@ export function GenSpace() {
       }
       await writeRecoveryContext({
         prompt,
+        centerPrompt: centerPromptForSubmission,
         settings: genSettings,
         modelLabel,
         inputImageUrl: imagePath ?? undefined,
@@ -2962,7 +3034,7 @@ export function GenSpace() {
         inputAudioUrl: audioPath ?? undefined,
         keyframes: mode === 'multi-keyframe' ? toPersistedKeyframes(keyframes) : undefined,
       })
-      generate(prompt, imagePath, genSettings, audioPath, lastImagePath, { mode, keyframes })
+      generate(sharedVideoPrompt, imagePath, genSettings, audioPath, lastImagePath, { mode, keyframes })
     }
   }
   
@@ -3160,6 +3232,8 @@ export function GenSpace() {
 
   return (
     <div className="h-full relative bg-zinc-950">
+      <div className="flex h-full min-h-0">
+        <div className="relative min-h-0 min-w-0 flex-1">
       <Group orientation="vertical" className="h-full w-full">
         <Panel id="genspace-content-panel" minSize={20} className="min-h-0">
           <div className="relative h-full min-h-0">
@@ -3475,6 +3549,16 @@ export function GenSpace() {
             })} />
           )}
         </div>
+      </div>
+        </div>
+
+        {activeProject && (
+          <ProjectPromptCenter
+            projectName={activeProject.name}
+            prompt={centerPrompt}
+            onPromptChange={handleCenterPromptChange}
+          />
+        )}
       </div>
 
       <LoraLibraryModal

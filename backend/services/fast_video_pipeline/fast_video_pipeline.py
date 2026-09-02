@@ -41,6 +41,7 @@ class FastVideoPipeline(Protocol):
         output_path: str,
         *,
         guide_all_images: bool = False,
+        generate_audio: bool = True,
     ) -> None:
         ...
 

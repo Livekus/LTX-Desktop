@@ -1,0 +1,43 @@
+import assert from 'node:assert/strict'
+import { describe, it } from 'node:test'
+import {
+  createDefaultTimeline,
+  generationParamsSchema,
+  normalizeProject,
+} from './project-model.ts'
+
+describe('project center prompt schema', () => {
+  it('defaults missing project center prompts for existing projects', () => {
+    const timeline = createDefaultTimeline('Timeline 1')
+    const project = normalizeProject({
+      version: 2,
+      id: 'project-1',
+      name: 'Series project',
+      createdAt: 1,
+      updatedAt: 2,
+      bins: {},
+      assets: [],
+      timelines: [timeline],
+      activeTimelineId: timeline.id,
+    })
+
+    assert.equal(project.centerPrompt, '')
+  })
+
+  it('stores center prompt separately from individual generation prompt', () => {
+    const params = generationParamsSchema.parse({
+      mode: 'text-to-video',
+      prompt: 'The couple walks through a rainy night market.',
+      centerPrompt: 'A romantic comedy series in warm natural light.',
+      model: 'fast',
+      duration: 5,
+      resolution: '540p',
+      fps: 24,
+      audio: true,
+      cameraMotion: 'none',
+    })
+
+    assert.equal(params.prompt, 'The couple walks through a rainy night market.')
+    assert.equal(params.centerPrompt, 'A romantic comedy series in warm natural light.')
+  })
+})

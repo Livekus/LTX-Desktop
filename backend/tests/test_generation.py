@@ -148,6 +148,19 @@ class TestGenerate:
         pipeline = fake_services.fast_video_pipeline
         assert len(pipeline.generate_calls) == 1
 
+    @pytest.mark.parametrize("audio_enabled", [False, True])
+    def test_t2v_forwards_audio_flag_to_local_pipeline(
+        self, client, fake_services, create_fake_model_files, test_state, audio_enabled
+    ):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post("/api/generate", json={**_T2V_JSON, "audio": audio_enabled})
+
+        assert r.status_code == 200
+        call = fake_services.fast_video_pipeline.generate_calls[0]
+        assert call["generate_audio"] is audio_enabled
+
     def test_t2v_auto_duration_on_2_5_forwards_envelope_range(
         self, client, test_state, fake_services, create_fake_model_files
     ):

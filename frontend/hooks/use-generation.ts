@@ -30,6 +30,7 @@ const VIDEO_PHASE_PROGRESS_RANGES: Record<string, PhaseProgressRange> = {
 export interface GenerationRecoveryContext {
   projectId: string
   prompt: string
+  centerPrompt?: string
   // Absent for ic-lora/retake: those recover as standalone video assets (Phase 1),
   // so there are no video/image settings to restore.
   settings?: GenerationSettings

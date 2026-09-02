@@ -149,6 +149,7 @@ class LTXFastVideoPipeline:
         output_path: str,
         *,
         guide_all_images: bool = False,
+        generate_audio: bool = True,
     ) -> None:
         video, audio, resolved_frames, resolved_tiling = self._run_inference(
             prompt=prompt,
@@ -161,6 +162,8 @@ class LTXFastVideoPipeline:
             tiling_config=auto_tiling_config(),
             guide_all_images=guide_all_images,
         )
+        if not generate_audio:
+            audio = None
         chunks = video_chunks_number(resolved_frames, resolved_tiling)
         encode_video_output(video=video, audio=audio, fps=int(frame_rate), output_path=output_path, video_chunks_number_value=chunks)
 

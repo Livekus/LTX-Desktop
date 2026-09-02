@@ -64,6 +64,7 @@ export const persistedKeyframeSchema = z.object({
 export const generationParamsSchema = z.object({
   mode: z.enum(generationModeValues),
   prompt: z.string(),
+  centerPrompt: z.string().optional(),
   model: z.string(),
   // Local pipeline ids ("fast") are shared across LTX versions, so `model` alone can't say
   // which version produced the asset. Captured at generation time from the backend spec's
@@ -351,6 +352,7 @@ export const projectV2Schema = z.object({
   version: z.literal(2),
   id: z.string(),
   name: z.string(),
+  centerPrompt: z.string().default(''),
   createdAt: z.number(),
   updatedAt: z.number(),
   bins: assetBinsSchema,

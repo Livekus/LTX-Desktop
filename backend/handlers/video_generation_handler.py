@@ -367,6 +367,7 @@ class VideoGenerationHandler(StateHandlerBase):
                     camera_motion=req.cameraMotion,
                     negative_prompt=req.negativePrompt,
                     loras=loras,
+                    generate_audio=req.audio,
                 )
 
                 self._generation.complete_generation(output_path)
@@ -414,6 +415,7 @@ class VideoGenerationHandler(StateHandlerBase):
         loras: list[tuple[str, float]] | None = None,
         last_image: Image.Image | None = None,
         keyframe_images: list[tuple[Image.Image, int, float]] | None = None,
+        generate_audio: bool = True,
     ) -> str:
         t_total_start = time.perf_counter()
         gen_mode = "keyframes" if keyframe_images else "i2v" if image is not None else "t2v"
@@ -422,7 +424,15 @@ class VideoGenerationHandler(StateHandlerBase):
             if isinstance(num_frames, AutoDurationSpec)
             else f"{num_frames} frames"
         )
-        logger.info("[%s] Generation started (model=fast, %dx%d, %s, %d fps)", gen_mode, width, height, frames_log, int(fps))
+        logger.info(
+            "[%s] Generation started (model=fast, %dx%d, %s, %d fps, audio=%s)",
+            gen_mode,
+            width,
+            height,
+            frames_log,
+            int(fps),
+            "on" if generate_audio else "off",
+        )
 
         self._generation.raise_if_cancelled()
 
@@ -479,6 +489,7 @@ class VideoGenerationHandler(StateHandlerBase):
                     images=images,
                     output_path=str(output_path),
                     guide_all_images=bool(keyframe_images),
+                    generate_audio=generate_audio,
                 )
             t_inference_end = time.perf_counter()
             logger.info("[%s] Inference: %.2fs", gen_mode, t_inference_end - t_inference_start)
