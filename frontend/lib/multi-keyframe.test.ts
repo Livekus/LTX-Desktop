@@ -8,6 +8,8 @@ import {
   DEFAULT_KEYFRAME_STRENGTH,
   MISSING_KEYFRAME_STRENGTH,
   fromPersistedKeyframes,
+  promptVideoImagePathsFromKeyframes,
+  promptVideoKeyframesFromImagePaths,
   toPersistedKeyframes,
   videoGenerationModeFromInputs,
   enhanceKeyframesPayload,
@@ -127,6 +129,38 @@ describe('applyKeyframeImagePaths', () => {
     })
 
     assert.deepEqual(next, [item('opening', '/new-opening.png', 0, 0.7)])
+  })
+})
+
+describe('prompt video image slots', () => {
+  it('places up to four prompt images evenly across the clip', () => {
+    let nextId = 0
+    const keyframes = promptVideoKeyframesFromImagePaths(
+      ['/a.png', '/b.png', '/c.png', '/d.png', '/e.png'],
+      120,
+      () => `id-${nextId++}`,
+    )
+
+    assert.deepEqual(
+      keyframes.map(({ id, path, frameIndex, strength }) => ({ id, path, frameIndex, strength })),
+      [
+        { id: 'id-0', path: '/a.png', frameIndex: 0, strength: DEFAULT_KEYFRAME_STRENGTH },
+        { id: 'id-1', path: '/b.png', frameIndex: 40, strength: DEFAULT_KEYFRAME_STRENGTH },
+        { id: 'id-2', path: '/c.png', frameIndex: 80, strength: DEFAULT_KEYFRAME_STRENGTH },
+        { id: 'id-3', path: '/d.png', frameIndex: 120, strength: DEFAULT_KEYFRAME_STRENGTH },
+      ],
+    )
+  })
+
+  it('reads prompt image paths in timeline order', () => {
+    assert.deepEqual(
+      promptVideoImagePathsFromKeyframes([
+        item('late', '/late.png', 80),
+        item('early', '/early.png', 0),
+        item('mid', '/mid.png', 40),
+      ], 2),
+      ['/early.png', '/mid.png'],
+    )
   })
 })
 

@@ -9,6 +9,7 @@ export {
 
 /** Local Distilled cap. Must match backend LOCAL_MULTI_KEYFRAME_MAX_COUNT. API stays 0. */
 export const LOCAL_MULTI_KEYFRAME_MAX_COUNT = 10
+export const PROMPT_VIDEO_IMAGE_MAX_COUNT = 4
 
 export interface KeyframeItem {
   id: string
@@ -33,6 +34,35 @@ export function appendKeyframePaths(
     next.push({ id: createId(), path, frameIndex, strength: DEFAULT_KEYFRAME_STRENGTH })
   }
   return next
+}
+
+function promptImageFrameIndex(index: number, count: number, lastFrame: number): number {
+  if (count <= 1) return 0
+  return Math.round((Math.max(0, lastFrame) * index) / (count - 1))
+}
+
+export function promptVideoKeyframesFromImagePaths(
+  paths: readonly string[],
+  lastFrame: number,
+  createId: () => string = () => crypto.randomUUID(),
+): KeyframeItem[] {
+  const count = Math.min(paths.length, PROMPT_VIDEO_IMAGE_MAX_COUNT)
+  return paths.slice(0, count).map((path, index) => ({
+    id: createId(),
+    path,
+    frameIndex: promptImageFrameIndex(index, count, lastFrame),
+    strength: DEFAULT_KEYFRAME_STRENGTH,
+  }))
+}
+
+export function promptVideoImagePathsFromKeyframes(
+  keyframes: readonly Pick<KeyframeItem, 'path' | 'frameIndex'>[],
+  maxCount: number = PROMPT_VIDEO_IMAGE_MAX_COUNT,
+): string[] {
+  return [...keyframes]
+    .sort((left, right) => left.frameIndex - right.frameIndex)
+    .slice(0, maxCount)
+    .map(({ path }) => path)
 }
 
 export function applyKeyframeImagePaths({
