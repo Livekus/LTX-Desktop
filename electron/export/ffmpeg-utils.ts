@@ -8,6 +8,16 @@ import { getPythonDir } from '../python-setup'
 
 let activeExportProcess: ChildProcess | null = null
 
+function systemFfmpegPath(): string | null {
+  const candidate = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
+  const result = spawnSync(candidate, ['-version'], {
+    encoding: 'utf8',
+    timeout: 5000,
+    windowsHide: true,
+  })
+  return result.status === 0 ? candidate : null
+}
+
 export function findFfmpegPath(): string | null {
   let binDir: string | null = null
 
@@ -35,7 +45,7 @@ export function findFfmpegPath(): string | null {
     if (bin) return path.join(binDir, bin)
   }
 
-  return null
+  return systemFfmpegPath()
 }
 
 /** Check if a video file contains an audio stream using ffprobe/ffmpeg */

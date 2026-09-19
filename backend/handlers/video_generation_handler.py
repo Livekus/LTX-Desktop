@@ -589,8 +589,14 @@ class VideoGenerationHandler(StateHandlerBase):
                     num_inference_steps=total_steps,
                     images=images,
                     audio_path=audio_path_str,
-                    audio_start_time=0.0,
-                    audio_max_duration=None,
+                    audio_start_time=req.audioStartTime,
+                    audio_max_duration=req.audioMaxDuration,
+                    # The model's 8n+1 grid may extend beyond the requested audio window.
+                    output_duration=(
+                        min(duration, req.audioMaxDuration)
+                        if req.audioMaxDuration is not None
+                        else duration
+                    ),
                     output_path=str(output_path),
                 )
 

@@ -87,7 +87,7 @@ export interface UseRegenerationParams {
     audioPath?: string | null,
     lastImagePath?: string | null,
     imageInputs?: { mode: GenSpaceMode; keyframes: KeyframeItem[] },
-  ) => Promise<void>
+  ) => Promise<unknown>
   regenGenerateImage: (prompt: string, settings: GenerationSettings, editSource?: string | null) => Promise<void>
   regenVideoPath: string | null
   regenImagePath: string | null

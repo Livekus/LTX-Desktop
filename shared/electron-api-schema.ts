@@ -182,16 +182,16 @@ export const electronAPISchemas = {
   },
 
   // Project assets
-  addVisualAssetToProject: {
-    input: z.object({ srcPath: z.string(), projectId: z.string(), type: z.enum(['video', 'image']) }),
-    output: ipcResult({
-      path: z.string(),
-      bigThumbnailPath: z.string(),
-      smallThumbnailPath: z.string(),
-      width: z.number(),
-      height: z.number(),
-    }),
-  },
+    addVisualAssetToProject: {
+      input: z.object({ srcPath: z.string(), projectId: z.string(), type: z.enum(['video', 'image']) }),
+      output: ipcResult({
+        path: z.string(),
+        bigThumbnailPath: z.string().optional(),
+        smallThumbnailPath: z.string().optional(),
+        width: z.number().optional(),
+        height: z.number().optional(),
+      }),
+    },
   addGenericAssetToProject: {
     input: z.object({ srcPath: z.string(), projectId: z.string() }),
     output: ipcResult({ path: z.string() }),
@@ -258,6 +258,10 @@ export const electronAPISchemas = {
   },
 
   // Video export
+  saveMutedVideo: {
+    input: z.object({ sourcePath: z.string(), outputPath: z.string() }),
+    output: ipcResult({ path: z.string() }),
+  },
   exportNative: {
     input: z.object({
       clips: z.array(exportClip),

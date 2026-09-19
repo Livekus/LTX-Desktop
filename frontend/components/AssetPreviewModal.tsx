@@ -4,6 +4,7 @@ import { Check, ChevronLeft, ChevronRight, Copy, X } from 'lucide-react'
 import type { Asset } from '../types/project-model'
 import { pathToFileUrl } from '../lib/file-url'
 import { formatPipelineDisplayName } from '../lib/video-generation-model-specs'
+import { AssetDownloadButton } from './AssetDownloadButton'
 
 const mediaClassName =
   'mx-auto max-h-[calc(100dvh-18vh-7rem)] max-w-full rounded-xl object-contain'
@@ -112,12 +113,19 @@ export function AssetPreviewModal({
           <span className="text-sm text-zinc-500 font-medium">
             {index + 1} / {total}
           </span>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-md text-zinc-400 hover:text-white transition-colors"
-          >
-            <X className="h-6 w-6" />
-          </button>
+          <div className="flex items-center gap-2">
+            <AssetDownloadButton
+              key={asset.id}
+              asset={asset}
+              className="p-2 rounded-md text-zinc-400 hover:bg-white/10 hover:text-white transition-colors"
+            />
+            <button
+              onClick={onClose}
+              className="p-2 rounded-md text-zinc-400 hover:text-white transition-colors"
+            >
+              <X className="h-6 w-6" />
+            </button>
+          </div>
         </div>
 
         {asset.type === 'video' ? (

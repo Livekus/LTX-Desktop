@@ -39,5 +39,6 @@ class A2VPipeline(Protocol):
         audio_path: str,
         audio_start_time: float,
         audio_max_duration: float | None,
+        output_duration: float,
         output_path: str,
     ) -> None: ...

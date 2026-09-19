@@ -1099,8 +1099,15 @@ export interface components {
              * @default false
              */
             audio: boolean;
+            /** Audiomaxduration */
+            audioMaxDuration?: number | null;
             /** Audiopath */
             audioPath?: string | null;
+            /**
+             * Audiostarttime
+             * @default 0
+             */
+            audioStartTime: number;
             /**
              * Cameramotion
              * @default none

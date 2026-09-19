@@ -43,6 +43,8 @@ export interface GenerationRecoveryContext {
   inputImageUrl?: string
   inputLastImageUrl?: string
   inputAudioUrl?: string
+  audioStartTime?: number
+  audioMaxDuration?: number
   keyframes?: PersistedKeyframe[]
   genType?: 'image' | 'enhance'
   // Frozen at marker write (job start) — same rule as hook canCancel. Lets Stop survive a
@@ -90,6 +92,20 @@ interface GenerationState {
 type GenerateVideoRequest = ApiRequestBodyOf<'generateVideo'>
 type GenerateImageRequest = ApiRequestBodyOf<'generateImage'>
 
+export interface GenerateVideoAudioTiming {
+  audioStartTime?: number
+  audioMaxDuration?: number | null
+}
+
+export type GenerateVideoRunResult =
+  | { status: 'complete'; videoPath: string }
+  | { status: 'cancelled' }
+  | { status: 'error'; error?: GenerationError }
+
+export interface GenerateVideoRunOptions {
+  exposeResult?: boolean
+}
+
 interface UseGenerationReturn extends GenerationState {
   generate: (
     prompt: string,
@@ -98,7 +114,9 @@ interface UseGenerationReturn extends GenerationState {
     audioPath?: string | null,
     lastImagePath?: string | null,
     imageInputs?: { mode: GenSpaceMode; keyframes: KeyframeItem[] },
-  ) => Promise<void>
+    audioTiming?: GenerateVideoAudioTiming,
+    runOptions?: GenerateVideoRunOptions,
+  ) => Promise<GenerateVideoRunResult>
   generateImage: (prompt: string, settings: GenerationSettings, editSource?: string | null) => Promise<void>
   cancel: () => void
   reset: () => void
@@ -259,7 +277,9 @@ export function useGeneration(): UseGenerationReturn {
     audioPath?: string | null,
     lastImagePath?: string | null,
     imageInputs?: { mode: GenSpaceMode; keyframes: KeyframeItem[] },
-  ) => {
+    audioTiming?: GenerateVideoAudioTiming,
+    runOptions?: GenerateVideoRunOptions,
+  ): Promise<GenerateVideoRunResult> => {
     const statusMsg = settings.model.startsWith('pro')
       ? 'Loading Pro model & generating...'
       : 'Generating video...'
@@ -279,7 +299,7 @@ export function useGeneration(): UseGenerationReturn {
     let progressInterval: ReturnType<typeof setInterval> | null = null
     let shouldApplyPollingUpdates = true
 
-    await withGenerationActive(async () => {
+    return await withGenerationActive(async (): Promise<GenerateVideoRunResult> => {
       try {
         // Prepare JSON body
         const body: Record<string, unknown> = {
@@ -301,6 +321,12 @@ export function useGeneration(): UseGenerationReturn {
         }
         if (audioPath) {
           body.audioPath = audioPath
+          if (audioTiming?.audioStartTime !== undefined) {
+            body.audioStartTime = audioTiming.audioStartTime
+          }
+          if (audioTiming?.audioMaxDuration !== undefined) {
+            body.audioMaxDuration = audioTiming.audioMaxDuration
+          }
         }
         if (settings.loras?.length) {
           body.loras = settings.loras.map(l => ({ ref: l.ref, scale: l.scale }))
@@ -376,22 +402,24 @@ export function useGeneration(): UseGenerationReturn {
             canCancel: false,
             error: result,
           }))
-          return
+          return { status: 'error', error: result }
         }
 
         const payload = result.data
         if (payload.status === 'complete') {
+          const shouldExposeResult = runOptions?.exposeResult !== false
           setState({
             isGenerating: false,
             isCancelling: false,
             canCancel: false,
             progress: 100,
             statusMessage: 'Complete!',
-            videoPath: payload.video_path,
+            videoPath: shouldExposeResult ? payload.video_path : null,
             imagePath: null,
             imagePaths: [],
             error: null,
           })
+          return { status: 'complete', videoPath: payload.video_path }
         } else if (payload.status === 'cancelled') {
           setState(prev => ({
             ...prev,
@@ -400,18 +428,21 @@ export function useGeneration(): UseGenerationReturn {
             canCancel: false,
             statusMessage: 'Cancelled',
           }))
+          return { status: 'cancelled' }
         } else {
           throw new Error('Unexpected response from /api/generate')
         }
 
       } catch (error) {
+        const generationError = createLocalGenerationError(error instanceof Error ? error.message : 'Unknown error')
         setState(prev => ({
           ...prev,
           isGenerating: false,
           isCancelling: false,
           canCancel: false,
-          error: createLocalGenerationError(error instanceof Error ? error.message : 'Unknown error'),
+          error: generationError,
         }))
+        return { status: 'error', error: generationError }
       } finally {
         shouldApplyPollingUpdates = false
         if (progressInterval) {

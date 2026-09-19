@@ -4,10 +4,10 @@ export type ProjectAssetType = 'video' | 'image'
 
 export interface ProjectAssetCopyResult {
   path: string
-  bigThumbnailPath: string
-  smallThumbnailPath: string
-  width: number
-  height: number
+  bigThumbnailPath?: string
+  smallThumbnailPath?: string
+  width?: number
+  height?: number
 }
 
 /**

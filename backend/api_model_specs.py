@@ -284,6 +284,12 @@ def validate_generate_video_request(
     if keyframe_error is not None:
         return keyframe_error
 
+    if audio_path is None and (req.audioStartTime != 0.0 or req.audioMaxDuration is not None):
+        return "Audio time windows require audioPath"
+
+    if use_api_specs and audio_path is not None and (req.audioStartTime != 0.0 or req.audioMaxDuration is not None):
+        return "Audio time windows are only supported for local audio-to-video"
+
     if last_image_path:
         if not image_path:
             return "Last frame requires a first-frame image"

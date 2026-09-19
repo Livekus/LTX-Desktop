@@ -671,6 +671,109 @@ class TestA2VGenerate:
         assert call["audio_path"] == str(audio_file)
         assert call["audio_start_time"] == 0.0
         assert call["audio_max_duration"] is None
+        assert call["num_frames"] == 121
+        assert call["output_duration"] == 5
+
+    def test_a2v_generation_forwards_audio_time_window(self, client, test_state, fake_services, create_fake_model_files, tmp_path):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+        audio_file = tmp_path / "test_audio.wav"
+        _write_test_wav(audio_file)
+
+        r = client.post(
+            "/api/generate",
+            json={
+                "prompt": "A lip-sync music video",
+                "resolution": "540p",
+                "model": "fast",
+                "duration": 5,
+                "fps": 24,
+                "audioPath": str(audio_file),
+                "audioStartTime": 12.5,
+                "audioMaxDuration": 4.25,
+            },
+        )
+
+        assert r.status_code == 200
+        call = fake_services.a2v_pipeline.generate_calls[0]
+        assert call["audio_start_time"] == 12.5
+        assert call["audio_max_duration"] == 4.25
+        assert call["num_frames"] == 121
+        assert call["output_duration"] == 4.25
+
+    @pytest.mark.parametrize("audio_max_duration", [20.0, 25.0])
+    def test_a2v_twenty_second_output_excludes_model_padding(
+        self, client, test_state, fake_services, create_fake_model_files, tmp_path, audio_max_duration
+    ):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+        audio_file = tmp_path / "test_audio.wav"
+        _write_test_wav(audio_file)
+
+        r = client.post(
+            "/api/generate",
+            json={
+                "prompt": "A lip-sync music video",
+                "resolution": "540p",
+                "model": "fast",
+                "duration": 20,
+                "fps": 24,
+                "audioPath": str(audio_file),
+                "audioStartTime": 120.0,
+                "audioMaxDuration": audio_max_duration,
+            },
+        )
+
+        assert r.status_code == 200
+        call = fake_services.a2v_pipeline.generate_calls[0]
+        assert call["num_frames"] == 481
+        assert call["output_duration"] == 20
+        assert call["audio_start_time"] == 120.0
+        assert call["audio_max_duration"] == audio_max_duration
+
+    def test_audio_time_window_requires_audio_path(self, client, test_state, create_fake_model_files):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "audioStartTime": 1.0},
+        )
+
+        assert_http_error(
+            r,
+            status_code=422,
+            code="INVALID_VIDEO_GENERATION_SPEC",
+            message="Audio time windows require audioPath",
+        )
+
+    def test_audio_time_window_rejected_for_forced_api_a2v(self, client, test_state, fake_services, tmp_path):
+        test_state.config.local_generations_mode = "unsupported"
+        test_state.state.app_settings.ltx_api_key = "api-key"
+        audio_file = tmp_path / "test_audio.wav"
+        _write_test_wav(audio_file)
+
+        r = client.post(
+            "/api/generate",
+            json={
+                "prompt": "A lip-sync music video",
+                "resolution": "1080p",
+                "model": "pro",
+                "duration": 6,
+                "fps": 50,
+                "audioPath": str(audio_file),
+                "audioStartTime": 8.0,
+                "audioMaxDuration": 3.0,
+            },
+        )
+
+        assert_http_error(
+            r,
+            status_code=422,
+            code="INVALID_VIDEO_GENERATION_SPEC",
+            message="Audio time windows are only supported for local audio-to-video",
+        )
+        assert len(fake_services.ltx_api_client.upload_file_calls) == 0
 
     def test_a2v_loras_forwarded_to_pipeline(self, client, test_state, fake_services, create_fake_model_files, create_fake_lora, tmp_path):
         _install_local_2_3(test_state, create_fake_model_files)

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import {
-  Trash2, Download, Image, Video, X,
+  Trash2, Image, Video, X,
   Heart, Film, Volume2, VolumeX, Sparkles, Sparkle,
   Clock, Monitor, ChevronUp, Scissors, Music, Undo2, Redo2, Loader2,
   MoveHorizontal, Wand2, Square, Rows3
@@ -10,7 +10,7 @@ import {
 import { useProjects } from '../contexts/ProjectContext'
 import type { GenSpaceRetakeSource } from '../contexts/ProjectContext'
 import { useAppSettings } from '../contexts/AppSettingsContext'
-import { useGeneration, GENERATION_RECOVERY_KEY, type GenerationRecoveryContext } from '../hooks/use-generation'
+import { useGeneration, GENERATION_RECOVERY_KEY, type GenerateVideoAudioTiming, type GenerationRecoveryContext } from '../hooks/use-generation'
 import { useFixedMenu } from '../hooks/use-fixed-menu'
 import { setActiveGenerationOwner, hasValidBaselineId } from '../lib/generation-recovery'
 import { withGenerationActive, canCancelLocalJob } from '../lib/generation-active'
@@ -35,6 +35,7 @@ import { useGlobalGenerationLock } from '../hooks/use-global-generation-lock'
 import type { ICLoraConditioningType } from '../components/ICLoraPanel'
 import type { Asset } from '../types/project-model'
 import { AssetPreviewModal } from '../components/AssetPreviewModal'
+import { AssetDownloadButton } from '../components/AssetDownloadButton'
 import { GenerationErrorDialog } from '../components/GenerationErrorDialog'
 import { addVisualAssetToProject } from '../lib/asset-copy'
 import { pathToFileUrl } from '../lib/file-url'
@@ -86,6 +87,7 @@ import {
   type GenSpaceMode,
 } from '../lib/genspace-multi-keyframe'
 import { buildSharedVideoPrompt } from '../lib/genspace-prompt'
+import { buildContinuousLipSyncSegmentJobs } from '../lib/lip-sync-segments'
 import {
   applyKeyframeImagePaths,
   enhanceKeyframesPayload,
@@ -104,6 +106,94 @@ import { GenSpaceGalleryToolbar } from './genspace/GenSpaceGalleryToolbar'
 import { gallerySizeClasses, type GallerySize } from './genspace/GenSpaceGallerySizeMenu'
 import { useGenSpaceGallery } from './genspace/useGenSpaceGallery'
 import { useGenSpacePromptBarHeight } from './genspace/useGenSpacePromptBarHeight'
+
+const SUPPORTED_AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'aac', 'flac', 'm4a']
+const MAX_LIP_SYNC_AUDIO_PERIOD_SECONDS = 20
+
+function isSupportedAudioFileName(name: string): boolean {
+  const ext = name.split('.').pop()?.toLowerCase()
+  return Boolean(ext && SUPPORTED_AUDIO_EXTENSIONS.includes(ext))
+}
+
+function fileNameFromPath(path: string): string {
+  return path.split(/[\\/]/).pop() || path
+}
+
+function roundAudioTime(value: number): number {
+  return Math.round(value * 1_000) / 1_000
+}
+
+function parseAudioTimeInput(value: string): number | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const parsed = Number(trimmed)
+  if (!Number.isFinite(parsed)) return null
+  return roundAudioTime(Math.max(0, parsed))
+}
+
+function audioPeriodDuration(startTime: number, endTime: number | null): number | null {
+  if (endTime === null) return null
+  return roundAudioTime(endTime - startTime)
+}
+
+function buildAudioTimingFromPeriod(startTime: number, endTime: number | null): GenerateVideoAudioTiming | undefined {
+  const audioStartTime = roundAudioTime(Math.max(0, startTime))
+  const audioMaxDuration = audioPeriodDuration(audioStartTime, endTime)
+  if (audioMaxDuration !== null && audioMaxDuration <= 0) return undefined
+  if (audioStartTime === 0 && audioMaxDuration === null) return undefined
+  return {
+    audioStartTime,
+    ...(audioMaxDuration !== null ? { audioMaxDuration } : {}),
+  }
+}
+
+function readAudioDurationSeconds(audioPath: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    const audio = new Audio()
+    let settled = false
+
+    const cleanup = () => {
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata)
+      audio.removeEventListener('error', handleError)
+      audio.removeAttribute('src')
+      audio.load()
+    }
+
+    const finish = (duration: number | null) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(duration)
+    }
+
+    const handleLoadedMetadata = () => {
+      const duration = Number.isFinite(audio.duration) && audio.duration > 0
+        ? roundAudioTime(audio.duration)
+        : null
+      finish(duration)
+    }
+
+    const handleError = () => finish(null)
+
+    audio.preload = 'metadata'
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata)
+    audio.addEventListener('error', handleError)
+    audio.src = pathToFileUrl(audioPath)
+  })
+}
+
+interface GenerateSubmissionSnapshot {
+  kind: 'video' | 'image'
+  prompt: string
+  centerPrompt?: string
+  settings: GenerationSettings
+  modelLabel?: string
+  inputImageUrl: string | null
+  inputLastImageUrl: string | null
+  inputAudioUrl: string | null
+  audioTiming?: GenerateVideoAudioTiming
+  keyframes?: KeyframeItem[]
+}
 
 // Asset card with hover overlays
 function AssetCard({
@@ -159,14 +249,6 @@ function AssetCard({
     const mins = Math.floor(seconds / 60)
     const secs = Math.floor(seconds % 60)
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
-  }
-
-  const handleDownload = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    const a = document.createElement('a')
-    a.href = pathToFileUrl(asset.path)
-    a.download = asset.path.split('/').pop() || `${asset.type}-${asset.id}`
-    a.click()
   }
 
   return (
@@ -288,12 +370,7 @@ function AssetCard({
           </div>
           
           <div className="flex items-center gap-1.5">
-            <button
-              onClick={handleDownload}
-              className="p-1.5 rounded-lg bg-black/40 backdrop-blur-md text-white hover:bg-black/60 transition-colors"
-            >
-              <Download className="h-3.5 w-3.5" />
-            </button>
+            <AssetDownloadButton asset={asset} />
             {/* Tools button hidden for now */}
           </div>
         </div>
@@ -491,14 +568,237 @@ function resolveResolution(options: ResolutionOption[], key: string): { width: n
   return { width: opt.width, height: opt.height }
 }
 
+function LipSyncAudioPanel({
+  audioPath,
+  startTime,
+  endTime,
+  continuous,
+  audioDuration,
+  audioDurationLoading,
+  periodIssue,
+  onAudioPathChange,
+  onAudioPeriodChange,
+  onContinuousChange,
+}: {
+  audioPath: string | null
+  startTime: number
+  endTime: number | null
+  continuous: boolean
+  audioDuration: number | null
+  audioDurationLoading: boolean
+  periodIssue?: string | null
+  onAudioPathChange: (path: string | null) => void
+  onAudioPeriodChange: (period: { startTime: number; endTime: number | null }) => void
+  onContinuousChange: (enabled: boolean) => void
+}) {
+  const audioInputRef = useRef<HTMLInputElement>(null)
+  const [isAudioDragOver, setIsAudioDragOver] = useState(false)
+  const effectiveEndTime = continuous && endTime === null ? audioDuration : endTime
+  const periodDuration = audioPeriodDuration(startTime, effectiveEndTime)
+
+  const applyAudioFile = (file: File) => {
+    if (!isSupportedAudioFileName(file.name)) return
+    const filePath = window.electronAPI?.getPathForFile(file)
+    if (filePath) onAudioPathChange(filePath)
+  }
+
+  const handleAudioDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsAudioDragOver(false)
+
+    const assetData = e.dataTransfer.getData('asset')
+    if (assetData) {
+      const asset = JSON.parse(assetData) as Asset
+      if (asset.type === 'audio') {
+        onAudioPathChange(asset.path)
+        return
+      }
+    }
+
+    const file = e.dataTransfer.files?.[0]
+    if (file) applyAudioFile(file)
+  }
+
+  const handleAudioFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) applyAudioFile(file)
+    e.currentTarget.value = ''
+  }
+
+  const handleStartTimeChange = (value: string) => {
+    onAudioPeriodChange({
+      startTime: parseAudioTimeInput(value) ?? 0,
+      endTime,
+    })
+  }
+
+  const handleEndTimeChange = (value: string) => {
+    onAudioPeriodChange({
+      startTime,
+      endTime: parseAudioTimeInput(value),
+    })
+  }
+
+  return (
+    <section className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-3">
+      <div className="flex items-center gap-2">
+        <Music className="h-4 w-4 text-emerald-400" />
+        <div className="min-w-0">
+          <h3 className="text-xs font-semibold text-zinc-200">Lip-sync audio</h3>
+          <p className="mt-0.5 text-[11px] leading-4 text-zinc-500">
+            Add the vocal or song file used to drive mouth timing.
+          </p>
+        </div>
+      </div>
+
+      <div
+        className={`mt-3 rounded-xl border border-dashed p-3 transition-colors ${
+          isAudioDragOver
+            ? 'border-emerald-500 bg-emerald-500/10'
+            : audioPath
+              ? 'border-emerald-700 bg-emerald-950/20'
+              : 'border-zinc-800 bg-zinc-900 hover:border-zinc-600'
+        }`}
+        onDragOver={(e) => { e.preventDefault(); setIsAudioDragOver(true) }}
+        onDragLeave={() => setIsAudioDragOver(false)}
+        onDrop={handleAudioDrop}
+      >
+        <button
+          type="button"
+          onClick={() => audioInputRef.current?.click()}
+          className="flex w-full items-center gap-2 text-left text-xs text-zinc-300"
+          title={audioPath ? 'Click to change lip-sync audio' : 'Attach lip-sync audio'}
+        >
+          <Music className={`h-4 w-4 flex-shrink-0 ${audioPath ? 'text-emerald-400' : 'text-zinc-500'}`} />
+          <span className="min-w-0 flex-1 truncate">
+            {audioPath ? fileNameFromPath(audioPath) : 'Drop or select vocal/song audio'}
+          </span>
+        </button>
+        {audioPath && (
+          <button
+            type="button"
+            onClick={() => onAudioPathChange(null)}
+            className="mt-2 text-[11px] text-zinc-500 hover:text-zinc-200"
+          >
+            Clear lip-sync audio
+          </button>
+        )}
+        <input
+          ref={audioInputRef}
+          type="file"
+          accept=".mp3,.wav,.ogg,.aac,.flac,.m4a"
+          onChange={handleAudioFileSelect}
+          className="hidden"
+        />
+      </div>
+      <p className="mt-2 text-[11px] leading-4 text-zinc-500">
+        Used only by video/A2V lip-sync jobs when the prompt bar has no audio override.
+      </p>
+      <p className="mt-1 text-[11px] leading-4 text-zinc-500">
+        For animals, prompt an anthropomorphic/front-facing face with visible mouth movement.
+      </p>
+
+      <label className="mt-3 flex items-start gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 p-2 text-xs text-zinc-300">
+        <input
+          type="checkbox"
+          checked={continuous}
+          onChange={(e) => onContinuousChange(e.target.checked)}
+          className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-950 accent-emerald-500"
+        />
+        <span>
+          <span className="block font-medium text-zinc-200">Generate continuously</span>
+          <span className="mt-0.5 block text-[11px] leading-4 text-zinc-500">
+            Splits from Start to End/song end using the selected Duration.
+          </span>
+        </span>
+      </label>
+      {continuous && audioPath && endTime === null && (
+        <p className="mt-2 text-[11px] leading-4 text-zinc-500">
+          {audioDurationLoading
+            ? 'Reading song duration...'
+            : audioDuration !== null
+              ? `Detected song end: ${audioDuration.toFixed(1)}s.`
+              : 'Song duration unavailable; set End manually.'}
+        </p>
+      )}
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <label className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+          Start (s)
+          <input
+            type="number"
+            min={0}
+            step={0.1}
+            value={startTime}
+            onChange={(e) => handleStartTimeChange(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200 focus:border-zinc-600 focus:outline-none"
+          />
+        </label>
+        <label className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+          End (s)
+          <input
+            type="number"
+            min={0}
+            step={0.1}
+            value={endTime ?? ''}
+            onChange={(e) => handleEndTimeChange(e.target.value)}
+            placeholder="Auto"
+            className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none"
+          />
+        </label>
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2 text-[11px] leading-4">
+        <span className={periodIssue ? 'text-red-400' : 'text-zinc-500'}>
+          {periodIssue ?? (periodDuration !== null
+            ? continuous
+              ? `Will generate ${periodDuration.toFixed(1)}s total in Duration-sized segments.`
+              : `Uses ${periodDuration.toFixed(1)}s from the audio file.`
+            : continuous
+              ? 'Leave End blank to run until the detected song end.'
+              : 'Leave End blank to use the generated clip duration.')}
+        </span>
+        {(startTime > 0 || endTime !== null) && (
+          <button
+            type="button"
+            onClick={() => onAudioPeriodChange({ startTime: 0, endTime: null })}
+            className="flex-shrink-0 text-zinc-500 hover:text-zinc-200"
+          >
+            Reset period
+          </button>
+        )}
+      </div>
+    </section>
+  )
+}
+
 function ProjectPromptCenter({
   projectName,
   prompt,
+  audioPath,
+  audioStartTime,
+  audioEndTime,
+  audioContinuous,
+  audioDuration,
+  audioDurationLoading,
+  audioPeriodIssue,
   onPromptChange,
+  onAudioPathChange,
+  onAudioPeriodChange,
+  onAudioContinuousChange,
 }: {
   projectName: string
   prompt: string
+  audioPath: string | null
+  audioStartTime: number
+  audioEndTime: number | null
+  audioContinuous: boolean
+  audioDuration: number | null
+  audioDurationLoading: boolean
+  audioPeriodIssue?: string | null
   onPromptChange: (prompt: string) => void
+  onAudioPathChange: (path: string | null) => void
+  onAudioPeriodChange: (period: { startTime: number; endTime: number | null }) => void
+  onAudioContinuousChange: (enabled: boolean) => void
 }) {
   return (
     <aside className="flex w-80 flex-shrink-0 flex-col border-l border-zinc-800 bg-zinc-950/95 p-4">
@@ -508,7 +808,7 @@ function ProjectPromptCenter({
           <span>Input Center</span>
         </div>
         <p className="mt-1 text-xs text-zinc-500 truncate" title={projectName}>
-          Shared prompt for {projectName}
+          Shared inputs for {projectName}
         </p>
       </div>
 
@@ -521,10 +821,19 @@ function ProjectPromptCenter({
         placeholder="Series premise, recurring characters, visual style, tone, and rules shared by every video in this project..."
         className="mt-2 min-h-0 flex-1 resize-none rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm leading-5 text-white placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
       />
-      <p className="mt-3 flex-shrink-0 text-xs leading-5 text-zinc-500">
-        This is prepended to video, retake, extend, and IC-LoRA generations.
-        Keep the bottom prompt for the current video's unique action.
-      </p>
+
+      <LipSyncAudioPanel
+        audioPath={audioPath}
+        startTime={audioStartTime}
+        endTime={audioEndTime}
+        continuous={audioContinuous}
+        audioDuration={audioDuration}
+        audioDurationLoading={audioDurationLoading}
+        periodIssue={audioPeriodIssue}
+        onAudioPathChange={onAudioPathChange}
+        onAudioPeriodChange={onAudioPeriodChange}
+        onContinuousChange={onAudioContinuousChange}
+      />
     </aside>
   )
 }
@@ -551,6 +860,7 @@ function PromptBar({
   onInputLastImageChange,
   inputAudio,
   onInputAudioChange,
+  centerAudioPath,
   promptImageSlotsEnabled,
   promptImagePaths,
   onPromptImagePathsChange,
@@ -632,6 +942,7 @@ function PromptBar({
   onInputLastImageChange: (path: string | null) => void
   inputAudio: string | null
   onInputAudioChange: (path: string | null) => void
+  centerAudioPath: string | null
   promptImageSlotsEnabled: boolean
   promptImagePaths: readonly string[]
   onPromptImagePathsChange: (paths: string[]) => void
@@ -694,7 +1005,8 @@ function PromptBar({
   const isExtend = mode === 'extend'
   const isIcLora = mode === 'ic-lora'
   const isEditingImage = mode === 'image' && !!inputImage
-  const showPromptImageSlots = mode === 'video' && promptImageSlotsEnabled && !inputAudio
+  const effectiveAudioPath = inputAudio || centerAudioPath
+  const showPromptImageSlots = mode === 'video' && promptImageSlotsEnabled && !effectiveAudioPath
   const promptSlotsUseKeyframes = showPromptImageSlots && keyframes.length > 0
   const availableModeValues = modeOptionValues({
     canUseMultiKeyframe,
@@ -747,7 +1059,7 @@ function PromptBar({
     ? resolveVideoGenerationOptions({
         settings,
         modelSpecs: videoModelSpecs,
-        hasAudio: !promptSlotsUseKeyframes && genSpaceUsesAudioInput(mode) && Boolean(inputAudio),
+        hasAudio: !promptSlotsUseKeyframes && genSpaceUsesAudioInput(mode) && Boolean(effectiveAudioPath),
         minimumDuration: isLocalMode ? undefined : GENSPACE_MIN_SELECTABLE_DURATION_S,
         durationSelection: promptSlotsUseKeyframes && settings.duration === null ? 'smallest_valid' : 'preserve',
       })
@@ -805,13 +1117,10 @@ function PromptBar({
 
     // Handle file drops
     const file = e.dataTransfer.files?.[0]
-    if (file) {
-      const ext = file.name.split('.').pop()?.toLowerCase()
-      if (['mp3', 'wav', 'ogg', 'aac', 'flac', 'm4a'].includes(ext || '')) {
-        const filePath = window.electronAPI?.getPathForFile(file)
-        if (filePath) {
-          onInputAudioChange(filePath)
-        }
+    if (file && isSupportedAudioFileName(file.name)) {
+      const filePath = window.electronAPI?.getPathForFile(file)
+      if (filePath) {
+        onInputAudioChange(filePath)
       }
     }
   }
@@ -824,6 +1133,7 @@ function PromptBar({
         onInputAudioChange(filePath)
       }
     }
+    e.currentTarget.value = ''
   }
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -881,6 +1191,21 @@ function PromptBar({
   const showStop = Boolean(isGenerating && onStop)
   const stopDisabled = Boolean(isCancelling)
   const generateDisabled = isGenerating || !canGenerate || isEnhancingPrompt
+  const promptPlaceholder = mode === 'retake'
+    ? "Describe what should happen in the selected section..."
+    : mode === 'extend'
+      ? "Describe what should happen in the new frames... (optional)"
+    : mode === 'ic-lora'
+      ? (promptOptional
+          ? "Describe the new area, or leave empty to extend the scene..."
+          : "Describe the style or transformation to apply...")
+    : mode === 'image'
+      ? (isEditingImage
+          ? "Describe the change, e.g. make it photorealistic..."
+          : "A close-up of a woman talking on the phone...")
+    : effectiveAudioPath
+      ? "A front-facing anthropomorphic cat singing to the song, visible mouth and jaw opening and closing exactly to the vocal timing, expressive face, clear lip-sync..."
+      : "The woman sips from a cup of coffee..."
 
   return (
     <div className="h-full min-h-0 flex flex-col bg-zinc-900 border border-zinc-800 rounded-2xl overflow-visible">
@@ -986,23 +1311,25 @@ function PromptBar({
         {genSpaceUsesAudioInput(mode) && !isRetake && !isIcLora && (
           <div
             className={`relative w-10 h-10 mt-2 self-start rounded-lg border-2 border-dashed transition-colors flex items-center justify-center flex-shrink-0 cursor-pointer ${
-              isAudioDragOver ? 'border-emerald-500 bg-emerald-500/10' : inputAudio ? 'border-emerald-600' : 'border-zinc-700 hover:border-zinc-500'
+              isAudioDragOver ? 'border-emerald-500 bg-emerald-500/10' : effectiveAudioPath ? 'border-emerald-600' : 'border-zinc-700 hover:border-zinc-500'
             }`}
             onDragOver={(e) => { e.preventDefault(); setIsAudioDragOver(true) }}
             onDragLeave={() => setIsAudioDragOver(false)}
             onDrop={handleAudioDrop}
             onClick={() => audioInputRef.current?.click()}
-            title={inputAudio ? 'Audio attached — click to change' : 'Attach audio for A2V'}
+            title={inputAudio ? 'Lip-sync audio override attached — click to change' : centerAudioPath ? 'Using Lip-sync audio panel — click to override' : 'Attach lip-sync audio for A2V'}
           >
-            {inputAudio ? (
+            {effectiveAudioPath ? (
               <>
                 <Music className="h-4 w-4 text-emerald-400" />
-                <button
-                  onClick={(e) => { e.stopPropagation(); onInputAudioChange(null) }}
-                  className="absolute -top-1 -right-1 p-0.5 rounded-full bg-zinc-800 text-zinc-400 hover:text-white z-10"
-                >
-                  <X className="h-3 w-3" />
-                </button>
+                {inputAudio && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onInputAudioChange(null) }}
+                    className="absolute -top-1 -right-1 p-0.5 rounded-full bg-zinc-800 text-zinc-400 hover:text-white z-10"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
               </>
             ) : (
               <Music className="h-4 w-4 text-zinc-500" />
@@ -1023,20 +1350,7 @@ function PromptBar({
             value={prompt}
             onChange={(e) => onPromptChange(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={mode === 'retake'
-              ? "Describe what should happen in the selected section..."
-              : mode === 'extend'
-                ? "Describe what should happen in the new frames... (optional)"
-              : mode === 'ic-lora'
-                ? (promptOptional
-                    ? "Describe the new area, or leave empty to extend the scene..."
-                    : "Describe the style or transformation to apply...")
-              : mode === 'image'
-                ? (isEditingImage
-                    ? "Describe the change, e.g. make it photorealistic..."
-                    : "A close-up of a woman talking on the phone...")
-                : "The woman sips from a cup of coffee..."
-            }
+            placeholder={promptPlaceholder}
             className="w-full h-full min-h-0 bg-transparent text-white text-sm placeholder:text-zinc-500 focus:outline-none px-2 py-2 resize-none overflow-y-auto leading-5"
           />
         </div>
@@ -1443,6 +1757,10 @@ export function GenSpace() {
   } = useProjects()
   const currentProjectId = activeProject?.id ?? null
   const centerPrompt = activeProject?.centerPrompt ?? ''
+  const centerAudioPath = activeProject?.centerAudioPath ?? null
+  const centerAudioStartTime = activeProject?.centerAudioStartTime ?? 0
+  const centerAudioEndTime = activeProject?.centerAudioEndTime ?? null
+  const centerAudioContinuous = activeProject?.centerAudioContinuous ?? false
   const { shouldVideoGenerateWithLtxApi, shouldImageGenerateWithFalApi, forceApiGenerations, settings: appSettings } = useAppSettings()
   const {
     modelSpecs: videoGenerationModelSpecsResponse,
@@ -1461,6 +1779,9 @@ export function GenSpace() {
   const [inputImage, setInputImage] = useState<string | null>(null)
   const [inputLastImage, setInputLastImage] = useState<string | null>(null)
   const [inputAudio, setInputAudio] = useState<string | null>(null)
+  const effectiveAudioPath = inputAudio || centerAudioPath
+  const [centerAudioDuration, setCenterAudioDuration] = useState<number | null>(null)
+  const [centerAudioDurationLoading, setCenterAudioDurationLoading] = useState(false)
   const [keyframes, setKeyframes] = useState<KeyframeItem[]>([])
   const [playheadFrame, setPlayheadFrame] = useState(0)
   const [dragFrame, setDragFrame] = useState<DraggedFrame | null>(null)
@@ -1475,6 +1796,11 @@ export function GenSpace() {
     resetHeight: resetPromptBarHeight,
     limits: promptBarHeightLimits,
   } = useGenSpacePromptBarHeight()
+  const [settings, setSettings] = useState(() => ({ ...DEFAULT_VIDEO_SETTINGS }))
+  const previousTimelineSettingsRef = useRef({
+    duration: settings.duration,
+    fps: settings.fps,
+  })
   const handleCenterPromptChange = useCallback((nextPrompt: string) => {
     if (!activeProject || !currentProjectId) return
     setProject(currentProjectId, {
@@ -1483,6 +1809,58 @@ export function GenSpace() {
       updatedAt: Date.now(),
     })
   }, [activeProject, currentProjectId, setProject])
+  const movePromptKeyframesToImageInputs = useCallback(() => {
+    if (keyframes.length === 0 || inputImage) return
+    const paths = promptVideoImagePathsFromKeyframes(keyframes, 2)
+    setInputImage(paths[0] ?? null)
+    setInputLastImage(settings.duration == null ? null : paths[1] ?? null)
+  }, [inputImage, keyframes, settings.duration])
+  const handleCenterAudioPathChange = useCallback((path: string | null) => {
+    if (!activeProject || !currentProjectId) return
+    if (path) movePromptKeyframesToImageInputs()
+    setProject(currentProjectId, {
+      ...activeProject,
+      centerAudioPath: path,
+      updatedAt: Date.now(),
+    })
+  }, [activeProject, currentProjectId, movePromptKeyframesToImageInputs, setProject])
+  const handleCenterAudioPeriodChange = useCallback((period: { startTime: number; endTime: number | null }) => {
+    if (!activeProject || !currentProjectId) return
+    setProject(currentProjectId, {
+      ...activeProject,
+      centerAudioStartTime: period.startTime,
+      centerAudioEndTime: period.endTime,
+      updatedAt: Date.now(),
+    })
+  }, [activeProject, currentProjectId, setProject])
+  const handleCenterAudioContinuousChange = useCallback((enabled: boolean) => {
+    if (!activeProject || !currentProjectId) return
+    setProject(currentProjectId, {
+      ...activeProject,
+      centerAudioContinuous: enabled,
+      updatedAt: Date.now(),
+    })
+  }, [activeProject, currentProjectId, setProject])
+
+  useEffect(() => {
+    let cancelled = false
+    setCenterAudioDuration(null)
+    if (!centerAudioPath) {
+      setCenterAudioDurationLoading(false)
+      return () => { cancelled = true }
+    }
+
+    setCenterAudioDurationLoading(true)
+    void readAudioDurationSeconds(centerAudioPath)
+      .then((duration) => {
+        if (!cancelled) setCenterAudioDuration(duration)
+      })
+      .finally(() => {
+        if (!cancelled) setCenterAudioDurationLoading(false)
+      })
+
+    return () => { cancelled = true }
+  }, [centerAudioPath])
   const persistedVideoKeyRef = useRef<string | null>(null)
   const retakeSubmissionRef = useRef<{
     prompt: string
@@ -1511,22 +1889,9 @@ export function GenSpace() {
   // Click-time t2v/i2v/a2v/image snapshot. The live picker can change while the job
   // runs; the completion effects must tag the asset with what was actually submitted.
   // Survives a refresh via the recovery marker restore below — the ref itself does not.
-  const generateSubmissionRef = useRef<{
-    kind: 'video' | 'image'
-    prompt: string
-    centerPrompt?: string
-    settings: GenerationSettings
-    modelLabel?: string
-    inputImageUrl: string | null
-    inputLastImageUrl: string | null
-    inputAudioUrl: string | null
-    keyframes?: KeyframeItem[]
-  } | null>(null)
-  const [settings, setSettings] = useState(() => ({ ...DEFAULT_VIDEO_SETTINGS }))
-  const previousTimelineSettingsRef = useRef({
-    duration: settings.duration,
-    fps: settings.fps,
-  })
+  const generateSubmissionRef = useRef<GenerateSubmissionSnapshot | null>(null)
+  const continuousStopRef = useRef(false)
+  const [continuousProgress, setContinuousProgress] = useState<{ current: number; total: number } | null>(null)
   const videoModelSpecs = getVideoGenerationModelSpecs(videoGenerationModelSpecsResponse, {
     useApiSpecs: shouldVideoGenerateWithLtxApi,
   })
@@ -1537,9 +1902,44 @@ export function GenSpace() {
       : null
   const hasPromptVideoKeyframes = mode === 'video'
     && !shouldVideoGenerateWithLtxApi
-    && !inputAudio
+    && !effectiveAudioPath
     && keyframes.length > 0
   const usesKeyframeVideoSettings = mode === 'multi-keyframe' || hasPromptVideoKeyframes
+  const centerAudioPeriodApplies = mode === 'video' && !inputAudio && Boolean(centerAudioPath)
+  const centerAudioPeriodDuration = audioPeriodDuration(centerAudioStartTime, centerAudioEndTime)
+  const centerAudioContinuousEndTime = centerAudioEndTime ?? centerAudioDuration
+  const centerAudioContinuousDuration = centerAudioContinuousEndTime !== null
+    ? audioPeriodDuration(centerAudioStartTime, centerAudioContinuousEndTime)
+    : null
+  const centerAudioPeriodHasWindow = centerAudioStartTime > 0 || centerAudioEndTime !== null
+  const centerAudioContinuousIssue = centerAudioContinuous && mode === 'video'
+    ? !centerAudioPath
+      ? 'Choose lip-sync audio before using continuous mode.'
+      : inputAudio
+        ? 'Continuous mode uses the Lip-sync audio panel; remove the prompt audio override.'
+        : shouldVideoGenerateWithLtxApi
+          ? 'Continuous lip-sync is only supported for local video generation.'
+          : settings.duration === null
+            ? 'Select a fixed Duration for continuous lip-sync.'
+            : settings.duration <= 0 || settings.duration > MAX_LIP_SYNC_AUDIO_PERIOD_SECONDS
+              ? `Selected Duration must be ${MAX_LIP_SYNC_AUDIO_PERIOD_SECONDS}s or shorter.`
+              : centerAudioEndTime === null && centerAudioDurationLoading
+                ? 'Reading audio duration before continuous lip-sync can start.'
+                : centerAudioEndTime === null && centerAudioDuration === null
+                  ? 'Could not read audio duration; set Audio End manually.'
+                  : centerAudioContinuousDuration !== null && centerAudioContinuousDuration <= 0
+                    ? 'Audio End/song end must be greater than Start.'
+                    : null
+    : null
+  const centerAudioPeriodIssue = centerAudioPeriodDuration !== null && centerAudioPeriodDuration <= 0
+    ? 'Audio End must be greater than Start.'
+    : !centerAudioContinuous && centerAudioPeriodDuration !== null && centerAudioPeriodDuration > MAX_LIP_SYNC_AUDIO_PERIOD_SECONDS
+      ? `Audio period must be ${MAX_LIP_SYNC_AUDIO_PERIOD_SECONDS}s or shorter.`
+    : centerAudioContinuousIssue
+      ? centerAudioContinuousIssue
+    : centerAudioPeriodApplies && centerAudioPeriodHasWindow && shouldVideoGenerateWithLtxApi
+      ? 'Audio period selection is only supported for local video generation.'
+      : null
   const sanitizeVideoSettings = useCallback(
     (
       next: typeof settings,
@@ -1547,12 +1947,12 @@ export function GenSpace() {
     ) => {
       if ((mode !== 'video' && mode !== 'multi-keyframe') || videoModelSpecs.length === 0) return next
       return sanitizeVideoGenerationSettings(next, videoModelSpecs, {
-        hasAudio: !usesKeyframeVideoSettings && genSpaceUsesAudioInput(mode) && Boolean(inputAudio),
+        hasAudio: !usesKeyframeVideoSettings && genSpaceUsesAudioInput(mode) && Boolean(effectiveAudioPath),
         minimumDuration: shouldVideoGenerateWithLtxApi ? GENSPACE_MIN_SELECTABLE_DURATION_S : undefined,
         durationSelection: usesKeyframeVideoSettings && next.duration === null ? 'smallest_valid' : durationSelection,
       }) ?? next
     },
-    [inputAudio, mode, shouldVideoGenerateWithLtxApi, usesKeyframeVideoSettings, videoModelSpecs],
+    [effectiveAudioPath, mode, shouldVideoGenerateWithLtxApi, usesKeyframeVideoSettings, videoModelSpecs],
   )
   
   const {
@@ -1636,13 +2036,9 @@ export function GenSpace() {
     videoModelSpecs,
   ])
   const handleInputAudioChange = useCallback((path: string | null) => {
-    if (path && keyframes.length > 0 && !inputImage) {
-      const paths = promptVideoImagePathsFromKeyframes(keyframes, 2)
-      setInputImage(paths[0] ?? null)
-      setInputLastImage(settings.duration == null ? null : paths[1] ?? null)
-    }
+    if (path) movePromptKeyframesToImageInputs()
     setInputAudio(path)
-  }, [inputImage, keyframes, settings.duration])
+  }, [movePromptKeyframesToImageInputs])
   // Enhance itself is independent of the video-generation backend — the backend enhance
   // endpoint only cares about the enhancer provider (local Gemma vs. Gemini), not whether video
   // generation runs locally or via the LTX API. If no catalog LoRA is selected (e.g. because the
@@ -2014,15 +2410,15 @@ export function GenSpace() {
   }, [canUseUserLoras, selectedLoras.length])
 
   useEffect(() => {
-    if (mode !== 'video' || !canUsePromptVideoImages || inputAudio || keyframes.length > 0 || !inputImage) return
+    if (mode !== 'video' || !canUsePromptVideoImages || effectiveAudioPath || keyframes.length > 0 || !inputImage) return
     handlePromptVideoImagePathsChange([
       inputImage,
       ...(inputLastImage ? [inputLastImage] : []),
     ])
   }, [
     canUsePromptVideoImages,
+    effectiveAudioPath,
     handlePromptVideoImagePathsChange,
-    inputAudio,
     inputImage,
     inputLastImage,
     keyframes.length,
@@ -2030,13 +2426,13 @@ export function GenSpace() {
   ])
 
   useEffect(() => {
-    if (mode !== 'video' || (canUsePromptVideoImages && !inputAudio) || keyframes.length === 0 || inputImage) return
+    if (mode !== 'video' || (canUsePromptVideoImages && !effectiveAudioPath) || keyframes.length === 0 || inputImage) return
     const paths = promptVideoImagePathsFromKeyframes(keyframes, 2)
     setInputImage(paths[0] ?? null)
     setInputLastImage(settings.duration == null ? null : paths[1] ?? null)
   }, [
     canUsePromptVideoImages,
-    inputAudio,
+    effectiveAudioPath,
     inputImage,
     keyframes,
     mode,
@@ -2128,7 +2524,7 @@ export function GenSpace() {
   // effect below is still copying the result into project storage" window — the marker is only
   // removed once that effect's own reset()/resetX() runs, so ownership must last at least that
   // long too, or the watcher can import the same completion a second time.
-  const isAnyLocalGenerationInFlight = isGenerating || isRetaking || isExtending || isIcLoraGenerating
+  const isAnyLocalGenerationInFlight = isGenerating || isRetaking || isExtending || isIcLoraGenerating || continuousProgress !== null
     || !!videoPath || imagePaths.length > 0 || !!retakeResult || !!extendResult || !!icLoraResult
   useEffect(() => {
     if (!isAnyLocalGenerationInFlight) return
@@ -2204,6 +2600,12 @@ export function GenSpace() {
           inputImageUrl: ctx.inputImageUrl ?? null,
           inputLastImageUrl: ctx.inputLastImageUrl ?? null,
           inputAudioUrl: ctx.inputAudioUrl ?? null,
+          audioTiming: ctx.audioStartTime !== undefined || ctx.audioMaxDuration !== undefined
+            ? {
+                ...(ctx.audioStartTime !== undefined ? { audioStartTime: ctx.audioStartTime } : {}),
+                ...(ctx.audioMaxDuration !== undefined ? { audioMaxDuration: ctx.audioMaxDuration } : {}),
+              }
+            : undefined,
           keyframes: fromPersistedKeyframes(ctx.keyframes ?? []),
         }
         // The completion effect reads this ref (not settings/inputImage) to tag a
@@ -2217,23 +2619,20 @@ export function GenSpace() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []) // mount only
 
-  // When video generation completes, add to project assets
-  useEffect(() => {
-    if (!videoPath || !currentProjectId || isGenerating) return
+  const persistGeneratedVideoAsset = useCallback(async (
+    completedVideoPath: string,
+    submission: GenerateSubmissionSnapshot | null,
+    fallbackPrompt: string,
+  ) => {
+    if (!currentProjectId) {
+      throw new Error('No active project to persist generated video')
+    }
 
-    // Dedup is by persistedVideoKeyRef, not an assets path-match like the image effect:
-    // addVisualAssetToProject copies to a fresh path so the source videoPath never appears
-    // in assets. A reload can't double-import either — recovery clears the marker once it
-    // reaches 'complete' (use-generation), so the sticky output is only restored once.
-    const generationKey = videoPath
-    if (persistedVideoKeyRef.current === generationKey) return
-    persistedVideoKeyRef.current = generationKey
-
-    const submission = generateSubmissionRef.current
     if (submission?.kind !== 'video') {
       logger.error('Video completed without a click-time submission; tagging from live picker state')
     }
-    const usedPrompt = submission?.kind === 'video' ? submission.prompt : lastPrompt
+
+    const usedPrompt = submission?.kind === 'video' ? submission.prompt : fallbackPrompt
     const usedCenterPrompt = submission?.kind === 'video'
       ? submission.centerPrompt
       : centerPrompt.trim() || undefined
@@ -2255,7 +2654,8 @@ export function GenSpace() {
         }
     const usedImage = submission?.kind === 'video' ? submission.inputImageUrl : inputImage
     const usedLastImage = submission?.kind === 'video' ? submission.inputLastImageUrl : inputLastImage
-    const usedAudio = submission?.kind === 'video' ? submission.inputAudioUrl : inputAudio
+    const usedAudio = submission?.kind === 'video' ? submission.inputAudioUrl : effectiveAudioPath
+    const usedAudioTiming = submission?.kind === 'video' ? submission.audioTiming : undefined
     const usedKeyframes = submission?.kind === 'video' ? submission.keyframes : keyframes
     const genMode = videoGenerationModeFromInputs({
       keyframes: usedKeyframes,
@@ -2263,55 +2663,88 @@ export function GenSpace() {
       imageUrl: usedImage,
     })
 
+    const copied = await addVisualAssetToProject(completedVideoPath, currentProjectId, 'video')
+    if (!copied) throw new Error('Could not persist generated video to project storage')
+
+    addAsset(currentProjectId, {
+      type: 'video',
+      path: copied.path,
+      bigThumbnailPath: copied.bigThumbnailPath,
+      smallThumbnailPath: copied.smallThumbnailPath,
+      width: copied.width,
+      height: copied.height,
+      prompt: usedPrompt,
+      resolution: usedSettings.videoResolution,
+      duration: usedSettings.duration ?? undefined,
+      generationParams: {
+        mode: genMode,
+        prompt: usedPrompt,
+        centerPrompt: usedCenterPrompt,
+        model: usedSettings.model,
+        modelLabel: (submission?.kind === 'video' ? submission.modelLabel : undefined)
+          ?? resolvePipelineDisplayName(videoModelSpecs, usedSettings.model)
+          ?? undefined,
+        duration: usedSettings.duration,
+        resolution: usedSettings.videoResolution,
+        fps: usedSettings.fps,
+        audio: usedSettings.audio || false,
+        cameraMotion: 'none',
+        imageAspectRatio: usedSettings.aspectRatio,
+        imageSteps: 4,
+        inputImageUrl: usedImage || undefined,
+        inputLastImageUrl: usedLastImage || undefined,
+        inputAudioUrl: usedAudio || undefined,
+        audioStartTime: usedAudioTiming?.audioStartTime,
+        audioMaxDuration: usedAudioTiming?.audioMaxDuration ?? undefined,
+        keyframes: usedKeyframes && usedKeyframes.length > 0
+          ? toPersistedKeyframes(usedKeyframes)
+          : undefined,
+        loras: usedSettings.loras && usedSettings.loras.length > 0
+          ? usedSettings.loras.map(l => ({ ...l, ref: toModelsDirRelativeRef(l.ref, appSettings.modelsDir) }))
+          : undefined,
+      },
+      takes: [{
+        path: copied.path,
+        bigThumbnailPath: copied.bigThumbnailPath,
+        smallThumbnailPath: copied.smallThumbnailPath,
+        width: copied.width,
+        height: copied.height,
+        createdAt: Date.now(),
+      }],
+      activeTakeIndex: 0,
+    })
+
+    return genMode
+  }, [
+    addAsset,
+    appSettings.modelsDir,
+    centerPrompt,
+    currentProjectId,
+    effectiveAudioPath,
+    inputImage,
+    inputLastImage,
+    keyframes,
+    settings,
+    videoModelSpecs,
+  ])
+
+  // When video generation completes, add to project assets
+  useEffect(() => {
+    if (!videoPath || !currentProjectId || isGenerating) return
+
+    // Dedup is by persistedVideoKeyRef, not an assets path-match like the image effect:
+    // addVisualAssetToProject copies to a fresh path so the source videoPath never appears
+    // in assets. A reload can't double-import either — recovery clears the marker once it
+    // reaches 'complete' (use-generation), so the sticky output is only restored once.
+    const generationKey = videoPath
+    if (persistedVideoKeyRef.current === generationKey) return
+    persistedVideoKeyRef.current = generationKey
+
+    const submission = generateSubmissionRef.current
+
     ;(async () => {
       try {
-        const copied = await addVisualAssetToProject(videoPath, currentProjectId, 'video')
-        if (!copied) throw new Error('Could not persist generated video to project storage')
-        addAsset(currentProjectId, {
-          type: 'video',
-          path: copied.path,
-          bigThumbnailPath: copied.bigThumbnailPath,
-          smallThumbnailPath: copied.smallThumbnailPath,
-          width: copied.width,
-          height: copied.height,
-          prompt: usedPrompt,
-          resolution: usedSettings.videoResolution,
-          duration: usedSettings.duration ?? undefined,
-          generationParams: {
-            mode: genMode,
-            prompt: usedPrompt,
-            centerPrompt: usedCenterPrompt,
-            model: usedSettings.model,
-            modelLabel: (submission?.kind === 'video' ? submission.modelLabel : undefined)
-              ?? resolvePipelineDisplayName(videoModelSpecs, usedSettings.model)
-              ?? undefined,
-            duration: usedSettings.duration,
-            resolution: usedSettings.videoResolution,
-            fps: usedSettings.fps,
-            audio: usedSettings.audio || false,
-            cameraMotion: 'none',
-            imageAspectRatio: usedSettings.aspectRatio,
-            imageSteps: 4,
-            inputImageUrl: usedImage || undefined,
-            inputLastImageUrl: usedLastImage || undefined,
-            inputAudioUrl: usedAudio || undefined,
-            keyframes: usedKeyframes && usedKeyframes.length > 0
-              ? toPersistedKeyframes(usedKeyframes)
-              : undefined,
-            loras: usedSettings.loras && usedSettings.loras.length > 0
-              ? usedSettings.loras.map(l => ({ ...l, ref: toModelsDirRelativeRef(l.ref, appSettings.modelsDir) }))
-              : undefined,
-          },
-          takes: [{
-            path: copied.path,
-            bigThumbnailPath: copied.bigThumbnailPath,
-            smallThumbnailPath: copied.smallThumbnailPath,
-            width: copied.width,
-            height: copied.height,
-            createdAt: Date.now(),
-          }],
-          activeTakeIndex: 0,
-        })
+        const genMode = await persistGeneratedVideoAsset(videoPath, submission, lastPrompt)
         generateSubmissionRef.current = null
         reset()
         const nextMode = modeAfterCompletedGeneration(genMode)
@@ -2321,7 +2754,7 @@ export function GenSpace() {
         logger.error(`Failed to persist generated video asset: ${err}`)
       }
     })()
-  }, [videoPath, currentProjectId, isGenerating, settings, inputImage, inputLastImage, inputAudio, keyframes, lastPrompt, centerPrompt, addAsset, reset, appSettings.modelsDir, videoModelSpecs, setMode])
+  }, [videoPath, currentProjectId, isGenerating, lastPrompt, persistGeneratedVideoAsset, reset, setMode])
 
   // When retake completes, add as take or new asset
   useEffect(() => {
@@ -3118,8 +3551,12 @@ export function GenSpace() {
       // Generate video (t2v if no image/audio, i2v if image, a2v if audio)
       const activeKeyframes = hasPromptVideoKeyframes ? promptVideoKeyframes : keyframes
       const submitAsKeyframes = mode === 'multi-keyframe' || hasPromptVideoKeyframes
+      if (!submitAsKeyframes && (centerAudioPeriodApplies || centerAudioContinuous) && centerAudioPeriodIssue) return
       const imagePath = submitAsKeyframes ? null : inputImage || null
-      const audioPath = submitAsKeyframes ? null : genSpaceUsesAudioInput(mode) ? inputAudio || null : null
+      const audioPath = submitAsKeyframes ? null : genSpaceUsesAudioInput(mode) ? effectiveAudioPath || null : null
+      const audioTiming = audioPath && !inputAudio && centerAudioPath
+        ? buildAudioTimingFromPeriod(centerAudioStartTime, centerAudioEndTime)
+        : undefined
       const videoSettings = sanitizeVideoSettings(settings)
       if (!videoSettings) return
       const lastImagePath = imagePath && videoSettings.duration != null ? inputLastImage : null
@@ -3135,6 +3572,131 @@ export function GenSpace() {
             : undefined,
       }
       const modelLabel = resolvePipelineDisplayName(videoModelSpecs, genSettings.model) ?? undefined
+
+      if (!submitAsKeyframes && centerAudioContinuous) {
+        const continuousEndTime = centerAudioEndTime ?? centerAudioDuration
+        if (!audioPath || inputAudio || !centerAudioPath || genSettings.duration === null || continuousEndTime === null) return
+
+        let jobs: ReturnType<typeof buildContinuousLipSyncSegmentJobs>
+        try {
+          jobs = buildContinuousLipSyncSegmentJobs({
+            audioPath,
+            basePrompt: sharedVideoPrompt,
+            settings: {
+              model: genSettings.model,
+              resolution: genSettings.videoResolution,
+              fps: genSettings.fps,
+              aspectRatio: genSettings.aspectRatio ?? '16:9',
+              audio: genSettings.audio,
+              cameraMotion: 'none',
+              negativePrompt: '',
+              loras: genSettings.loras,
+            },
+            startTime: centerAudioStartTime,
+            endTime: continuousEndTime,
+            segmentDuration: genSettings.duration,
+            imagePath,
+            lastImagePath,
+          })
+        } catch (err) {
+          setLocalError(createLocalGenerationError(err instanceof Error ? err.message : 'Could not create lip-sync segments'))
+          return
+        }
+
+        if (jobs.length === 0) {
+          setLocalError(createLocalGenerationError('No lip-sync segments were created from the selected audio period.'))
+          return
+        }
+
+        continuousStopRef.current = false
+        setContinuousProgress({ current: 0, total: jobs.length })
+        let nextSegmentImagePath = imagePath
+
+        try {
+          for (let index = 0; index < jobs.length; index += 1) {
+            if (continuousStopRef.current) break
+
+            const job = jobs[index]
+            const segmentImagePath = index === 0 ? imagePath : nextSegmentImagePath
+            const segmentLastImagePath = index === 0 && segmentImagePath ? lastImagePath : null
+            const segmentSettings: GenerationSettings = {
+              ...genSettings,
+              duration: job.request.duration,
+            }
+            const segmentAudioTiming: GenerateVideoAudioTiming = {
+              audioStartTime: job.audioStartTime,
+              audioMaxDuration: job.audioMaxDuration,
+            }
+            const segmentSubmission: GenerateSubmissionSnapshot = {
+              kind: 'video',
+              prompt,
+              centerPrompt: centerPromptForSubmission,
+              settings: segmentSettings,
+              modelLabel,
+              inputImageUrl: segmentImagePath,
+              inputLastImageUrl: segmentLastImagePath,
+              inputAudioUrl: audioPath,
+              audioTiming: segmentAudioTiming,
+            }
+
+            setContinuousProgress({ current: index + 1, total: jobs.length })
+            generateSubmissionRef.current = segmentSubmission
+            await writeRecoveryContext({
+              prompt,
+              centerPrompt: centerPromptForSubmission,
+              settings: segmentSettings,
+              modelLabel,
+              inputImageUrl: segmentImagePath ?? undefined,
+              inputLastImageUrl: segmentLastImagePath ?? undefined,
+              inputAudioUrl: audioPath,
+              audioStartTime: segmentAudioTiming.audioStartTime,
+              audioMaxDuration: segmentAudioTiming.audioMaxDuration ?? undefined,
+            })
+
+            const result = await generate(
+              job.request.prompt,
+              segmentImagePath,
+              segmentSettings,
+              audioPath,
+              segmentLastImagePath,
+              { mode: 'video', keyframes: [] },
+              segmentAudioTiming,
+              { exposeResult: false },
+            )
+
+            if (result.status === 'cancelled') break
+            if (result.status === 'error') {
+              setLocalError(result.error ?? createLocalGenerationError('Continuous lip-sync generation failed.'))
+              break
+            }
+
+            await persistGeneratedVideoAsset(result.videoPath, segmentSubmission, prompt)
+            localStorage.removeItem(GENERATION_RECOVERY_KEY)
+
+            try {
+              const frame = await window.electronAPI.extractVideoFrame({
+                videoPath: result.videoPath,
+                seekTime: Math.max(0, (segmentSettings.duration ?? job.audioMaxDuration) - 0.1),
+                width: 1024,
+                quality: 2,
+              })
+              nextSegmentImagePath = frame.path
+            } catch (err) {
+              logger.warn(`Could not extract continuity frame from segment ${index + 1}: ${err}`)
+            }
+          }
+        } catch (err) {
+          logger.error(`Continuous lip-sync generation failed: ${err}`)
+          setLocalError(createLocalGenerationError(err instanceof Error ? err.message : 'Continuous lip-sync generation failed.'))
+        } finally {
+          generateSubmissionRef.current = null
+          continuousStopRef.current = false
+          setContinuousProgress(null)
+          reset()
+        }
+        return
+      }
+
       generateSubmissionRef.current = {
         kind: 'video',
         prompt,
@@ -3144,6 +3706,7 @@ export function GenSpace() {
         inputImageUrl: imagePath,
         inputLastImageUrl: lastImagePath,
         inputAudioUrl: audioPath,
+        audioTiming,
         keyframes: submitAsKeyframes ? activeKeyframes : undefined,
       }
       await writeRecoveryContext({
@@ -3154,12 +3717,14 @@ export function GenSpace() {
         inputImageUrl: imagePath ?? undefined,
         inputLastImageUrl: lastImagePath ?? undefined,
         inputAudioUrl: audioPath ?? undefined,
+        audioStartTime: audioTiming?.audioStartTime,
+        audioMaxDuration: audioTiming?.audioMaxDuration ?? undefined,
         keyframes: submitAsKeyframes ? toPersistedKeyframes(activeKeyframes) : undefined,
       })
       generate(sharedVideoPrompt, imagePath, genSettings, audioPath, lastImagePath, {
         mode: submitAsKeyframes ? 'multi-keyframe' : mode,
         keyframes: activeKeyframes,
-      })
+      }, audioTiming)
     }
   }
   
@@ -3234,7 +3799,7 @@ export function GenSpace() {
     && resolveVideoGenerationOptions({
       settings,
       modelSpecs: videoModelSpecs,
-      hasAudio: !usesKeyframeVideoSettings && genSpaceUsesAudioInput(mode) && Boolean(inputAudio),
+      hasAudio: !usesKeyframeVideoSettings && genSpaceUsesAudioInput(mode) && Boolean(effectiveAudioPath),
       minimumDuration: shouldVideoGenerateWithLtxApi ? GENSPACE_MIN_SELECTABLE_DURATION_S : undefined,
       durationSelection: usesKeyframeVideoSettings && settings.duration === null ? 'smallest_valid' : 'preserve',
     }).hasCompatibleOptions
@@ -3243,7 +3808,7 @@ export function GenSpace() {
   // GenSpace mode tab. Retake/extend/IC-LoRA live in different hooks than video/image.
   // After a UI refresh those hooks remount at false; the same progress poll that disables
   // Generate (isOtherGenerationRunning) is the SSOT for "slot busy" / Stop.
-  const slotBusyLocally = isGenerating || isRetaking || isExtending || isIcLoraGenerating
+  const slotBusyLocally = isGenerating || isRetaking || isExtending || isIcLoraGenerating || continuousProgress !== null
   const slotBusy = slotBusyLocally || isOtherGenerationRunning
   const canSubmit = !isOtherGenerationRunning && !slotBusyLocally && (isRetakeMode
     ? retakeInput.ready && !!retakeInput.videoPath
@@ -3255,8 +3820,15 @@ export function GenSpace() {
         : !!prompt.trim()
           && (mode !== 'multi-keyframe' || keyframes.length >= 1)
           && (!hasPromptVideoKeyframes || settings.duration !== null)
-          && hasCompatibleVideoSettings)
-  const promptButtonLabel = isRetakeMode ? 'Retake' : isExtendMode ? 'Extend' : isIcLoraMode ? 'Generate' : 'Generate'
+          && hasCompatibleVideoSettings
+          && (!(mode === 'video' && (centerAudioPeriodApplies || centerAudioContinuous)) || !centerAudioPeriodIssue))
+  const promptButtonLabel = isRetakeMode
+    ? 'Retake'
+    : isExtendMode
+      ? 'Extend'
+      : centerAudioContinuous && mode === 'video'
+        ? 'Generate Song'
+        : 'Generate'
   const promptButtonIcon = isRetakeMode
     ? <Scissors className="h-3.5 w-3.5" />
     : isExtendMode
@@ -3270,16 +3842,32 @@ export function GenSpace() {
     if (!promptGenerating) setIsStopping(false)
   }, [promptGenerating])
   const handleStop = useCallback(() => {
+    const confirmed = window.confirm(
+      continuousProgress
+        ? 'Cancel continuous generation?\n\nThis will stop the current segment and prevent the remaining song segments from starting.'
+        : 'Cancel the current generation?',
+    )
+    if (!confirmed) return
+
+    continuousStopRef.current = true
     setIsStopping(true)
     cancel()
-  }, [cancel])
+  }, [cancel, continuousProgress])
   const inFlightCanStop = globalCanCancel
-    || generationCanCancel || retakeCanCancel || extendCanCancel || icLoraCanCancel
+    || generationCanCancel || retakeCanCancel || extendCanCancel || icLoraCanCancel || continuousProgress !== null
   const isLibraryMode = isGenSpaceLibraryMode(mode)
   const generatingTileKind = mode === 'image' ? 'image' : 'video'
-  const showGeneratingTile = isGenerating
+  const showGeneratingTile = (isGenerating || continuousProgress !== null)
     && isLibraryMode
     && shouldShowGeneratingTile(typeFilter, generatingTileKind)
+  const displayedGenerationProgress = continuousProgress
+    ? (((Math.max(continuousProgress.current, 1) - 1) + (progress / 100)) / continuousProgress.total) * 100
+    : progress
+  const displayedStatusMessage = continuousProgress
+    ? continuousProgress.current > 0
+      ? `Generating song segment ${continuousProgress.current}/${continuousProgress.total}...`
+      : 'Preparing song segments...'
+    : statusMessage
   const displayedPreviewKeyframe = previewKeyframeForPlayhead(
     keyframes,
     playheadFrame,
@@ -3421,17 +4009,17 @@ export function GenSpace() {
                         <Sparkles className="h-6 w-6 text-violet-400" />
                       </div>
                     </div>
-                    <p className="text-sm text-zinc-400">{statusMessage || 'Generating...'}</p>
-                    {progress > 0 && (
+                    <p className="text-sm text-zinc-400">{displayedStatusMessage || 'Generating...'}</p>
+                    {displayedGenerationProgress > 0 && (
                       <>
                         <div className="w-32 h-1 bg-zinc-800 rounded-full mt-2 overflow-hidden">
                           <div
                             className="h-full bg-violet-500 transition-all"
-                            style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
+                            style={{ width: `${Math.max(0, Math.min(100, displayedGenerationProgress))}%` }}
                           />
                         </div>
                         <p className="mt-1 text-[10px] text-zinc-500">
-                          {Math.round(Math.max(0, Math.min(100, progress)))}%
+                          {Math.round(Math.max(0, Math.min(100, displayedGenerationProgress)))}%
                         </p>
                       </>
                     )}
@@ -3594,6 +4182,7 @@ export function GenSpace() {
                 onInputLastImageChange={setInputLastImage}
                 inputAudio={inputAudio}
                 onInputAudioChange={handleInputAudioChange}
+                centerAudioPath={centerAudioPath}
                 promptImageSlotsEnabled={canUsePromptVideoImages}
                 promptImagePaths={promptVideoImagePaths}
                 onPromptImagePathsChange={handlePromptVideoImagePathsChange}
@@ -3687,7 +4276,17 @@ export function GenSpace() {
           <ProjectPromptCenter
             projectName={activeProject.name}
             prompt={centerPrompt}
+            audioPath={centerAudioPath}
+            audioStartTime={centerAudioStartTime}
+            audioEndTime={centerAudioEndTime}
+            audioContinuous={centerAudioContinuous}
+            audioDuration={centerAudioDuration}
+            audioDurationLoading={centerAudioDurationLoading}
+            audioPeriodIssue={centerAudioPeriodIssue}
             onPromptChange={handleCenterPromptChange}
+            onAudioPathChange={handleCenterAudioPathChange}
+            onAudioPeriodChange={handleCenterAudioPeriodChange}
+            onAudioContinuousChange={handleCenterAudioContinuousChange}
           />
         )}
       </div>

@@ -1120,6 +1120,18 @@
             "title": "Audio",
             "type": "boolean"
           },
+          "audioMaxDuration": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audiomaxduration"
+          },
           "audioPath": {
             "anyOf": [
               {
@@ -1130,6 +1142,12 @@
               }
             ],
             "title": "Audiopath"
+          },
+          "audioStartTime": {
+            "default": 0.0,
+            "minimum": 0.0,
+            "title": "Audiostarttime",
+            "type": "number"
           },
           "cameraMotion": {
             "default": "none",

@@ -296,8 +296,26 @@ export function registerFileHandlers(): void {
     try {
       const resolvedSrc = resolveLocalSourcePath(srcPath)
       const destPath = copyToProjectAssetDirectory(resolvedSrc, projectId)
-      const { bigThumbnailPath, smallThumbnailPath } = createVisualThumbnails(destPath, type)
-      const { width, height } = getVisualAssetDimensions(destPath, type)
+      let bigThumbnailPath: string | undefined
+      let smallThumbnailPath: string | undefined
+      let width: number | undefined
+      let height: number | undefined
+
+      try {
+        const thumbnails = createVisualThumbnails(destPath, type)
+        bigThumbnailPath = thumbnails.bigThumbnailPath
+        smallThumbnailPath = thumbnails.smallThumbnailPath
+      } catch (error) {
+        logger.warn(`Visual asset copied without thumbnails: ${error}`)
+      }
+
+      try {
+        const dimensions = getVisualAssetDimensions(destPath, type)
+        width = dimensions.width
+        height = dimensions.height
+      } catch (error) {
+        logger.warn(`Visual asset copied without dimensions: ${error}`)
+      }
 
       return {
         success: true,

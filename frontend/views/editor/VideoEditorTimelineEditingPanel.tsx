@@ -96,7 +96,7 @@ type GapAnchor = { x: number; gapTop: number; gapBottom: number } | null
 type GapGenerateMode = 'text-to-video' | 'image-to-video' | 'text-to-image'
 
 interface GapGenerationApi {
-  generate: (prompt: string, imagePath: string | null, settings: GenerationSettings) => Promise<void>
+  generate: (prompt: string, imagePath: string | null, settings: GenerationSettings) => Promise<unknown>
   generateImage: (prompt: string, settings: GenerationSettings) => Promise<void>
   videoPath: string | null
   imagePath: string | null

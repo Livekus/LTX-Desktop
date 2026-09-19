@@ -475,6 +475,8 @@ class GenerateVideoRequest(BaseModel):
     lastImagePath: str | None = None
     keyframes: list[KeyframeInput] = Field(default_factory=list[KeyframeInput])
     audioPath: str | None = None
+    audioStartTime: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
+    audioMaxDuration: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
     aspectRatio: Literal["16:9", "9:16"] = "16:9"
     seed: int | None = None
     loras: list[LoraEntry] = Field(default_factory=list[LoraEntry])

@@ -5,12 +5,28 @@ import { getAllowedRoots } from '../config'
 import { logger } from '../logger'
 import { validatePath } from '../path-validation'
 import { findFfmpegPath, runFfmpeg, stopExportProcess } from './ffmpeg-utils'
+import { saveMutedVideo } from './muted-video'
 import { flattenTimeline } from './timeline'
 import { buildVideoFilterGraph } from './video-filter'
 import { mixAudioToPcm } from './audio-mix'
 import { handle } from '../ipc/typed-handle'
 
 export function registerExportHandlers(): void {
+  handle('saveMutedVideo', async ({ sourcePath, outputPath }) => {
+    try {
+      const source = validatePath(sourcePath, getAllowedRoots())
+      const destination = validatePath(outputPath, getAllowedRoots())
+      const ffmpegPath = findFfmpegPath()
+      if (!ffmpegPath) return { success: false, error: 'FFmpeg not found. Please restart the app and try again.' }
+
+      await saveMutedVideo(ffmpegPath, source, destination)
+      return { success: true, path: destination }
+    } catch (error) {
+      logger.error(`Error downloading video without audio: ${error}`)
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
   handle('exportNative', async ({ clips, outputPath, codec, width, height, fps, quality, letterbox, subtitles }) => {
     const ffmpegPath = findFfmpegPath()
     if (!ffmpegPath) return { success: false, error: 'FFmpeg not found' }

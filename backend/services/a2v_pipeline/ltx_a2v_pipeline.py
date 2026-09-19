@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 
 import torch
 
 from api_types import ImageConditioningInput
+from services.a2v_pipeline.output_timing import trim_a2v_output
 from services.ltx_pipeline_common import (
     build_model_paths,
     encode_video_output,
@@ -126,6 +127,7 @@ class LTXa2vPipeline:
         audio_path: str,
         audio_start_time: float,
         audio_max_duration: float | None,
+        output_duration: float,
         output_path: str,
     ) -> None:
         tiling_config = resolve_tiling_config(
@@ -151,4 +153,15 @@ class LTXa2vPipeline:
             tiling_config=tiling_config,
         )
         chunks = video_chunks_number(num_frames, tiling_config)
-        encode_video_output(video=video, audio=audio, fps=int(frame_rate), output_path=output_path, video_chunks_number_value=chunks)
+        video, audio = trim_a2v_output(video, audio, duration=output_duration, fps=int(frame_rate))
+        try:
+            encode_video_output(
+                video=video,
+                audio=audio,
+                fps=int(frame_rate),
+                output_path=output_path,
+                video_chunks_number_value=chunks,
+            )
+        finally:
+            if isinstance(video, Generator):
+                video.close()
